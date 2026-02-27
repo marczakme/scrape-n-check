@@ -18,7 +18,7 @@ except Exception:
 
 ProgressCallback = Callable[[int, int, str], None]
 
-MIN_WORDS_ARTICLE_MARKDOWN = 120  # realny artykuł zwykle ma dużo więcej; listingi łatwiej odsiać
+MIN_WORDS_ARTICLE_MARKDOWN = 120
 MAX_REDIRECTS = 3
 
 
@@ -102,9 +102,6 @@ def _likely_article_url(url: str) -> bool:
 
 
 def _is_listing_like(url: str) -> bool:
-    """
-    Detect typical list pages to treat redirects as "not an article".
-    """
     path = (urllib.parse.urlsplit(url).path or "/").lower()
     if path.rstrip("/") in ("/blog", "/blog/"):
         return True
@@ -136,7 +133,7 @@ def _safe_get_no_redirect(session: requests.Session, url: str, cfg: ScrapeConfig
             url,
             timeout=cfg.timeout,
             headers=_browser_headers(cfg, referer=referer),
-            allow_redirects=False,  # kluczowe
+            allow_redirects=False,
         )
         return resp
     except requests.RequestException:
@@ -149,26 +146,18 @@ def _follow_redirects_manually(
     cfg: ScrapeConfig,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> Optional[requests.Response]:
-    """
-    Fetch URL without auto-redirects; follow up to MAX_REDIRECTS only within the same site.
-    If redirect leads to listing-like URL (e.g., /blog/), treat as soft-block and return that response
-    (caller may decide to skip).
-    """
     current = _normalize_url(url)
     referer = cfg.base_url
 
-    for hop in range(MAX_REDIRECTS + 1):
+    for _hop in range(MAX_REDIRECTS + 1):
         resp = _safe_get_no_redirect(session, current, cfg, referer=referer)
         if resp is None:
             return None
 
-        # 2xx OK
         if 200 <= resp.status_code < 300:
-            # Attach a helpful attribute: final_url
             resp.final_url = current  # type: ignore[attr-defined]
             return resp
 
-        # redirects
         if resp.status_code in (301, 302, 303, 307, 308):
             loc = resp.headers.get("Location") or ""
             nxt = _normalize_url(urllib.parse.urljoin(current, loc))
@@ -176,14 +165,11 @@ def _follow_redirects_manually(
             if progress_callback:
                 progress_callback(0, 0, f"Redirect {resp.status_code}: {current} → {nxt}")
 
-            # block external jumps
             if not _is_internal(nxt, cfg.base_url, cfg.same_subdomain_only):
                 resp.final_url = current  # type: ignore[attr-defined]
                 return resp
 
-            # if redirected to listing-like page, likely bot/consent soft redirect
             if _is_listing_like(nxt):
-                # Return response but mark final_url as the listing target
                 resp.final_url = nxt  # type: ignore[attr-defined]
                 resp.soft_redirect_to_listing = True  # type: ignore[attr-defined]
                 return resp
@@ -192,7 +178,6 @@ def _follow_redirects_manually(
             current = nxt
             continue
 
-        # other codes (403/503 etc.)
         resp.final_url = current  # type: ignore[attr-defined]
         return resp
 
@@ -247,12 +232,18 @@ def _extract_markdown_trafilatura(html: str, url: str) -> str:
 
 
 def _remove_boilerplate(body: Tag) -> None:
+    """
+    Bezpieczne usuwanie boilerplate.
+    Poprawka na błąd: czasem w pętli trafiają się elementy nie-Tag albo już zdekomponowane.
+    """
+    # 1) usuń oczywiste elementy
     for tname in ["script", "style", "noscript", "svg"]:
         for t in body.find_all(tname):
             try:
                 t.decompose()
             except Exception:
                 pass
+
     for tname in ["nav", "footer", "header", "aside", "form"]:
         for t in body.find_all(tname):
             try:
@@ -260,6 +251,7 @@ def _remove_boilerplate(body: Tag) -> None:
             except Exception:
                 pass
 
+    # 2) usuń po class/id (cookie, share, related itd.)
     bad_patterns = [
         "cookie", "consent", "gdpr",
         "newsletter", "subscribe",
@@ -272,9 +264,29 @@ def _remove_boilerplate(body: Tag) -> None:
         "pagination", "pager",
         "sidebar",
     ]
-    for t in body.find_all(True):
-        cls = " ".join(t.get("class", [])).lower()
-        tid = (t.get("id") or "").lower()
+
+    # UWAGA: po decompose DOM się zmienia, więc iterujemy po snapshotcie listy
+    nodes = list(body.find_all(True))
+    for t in nodes:
+        # Bezpiecznik: tylko Tag
+        if not isinstance(t, Tag):
+            continue
+        # Bezpiecznik: czasem element po decompose może mieć brak attrs
+        try:
+            class_attr = t.get("class", [])
+            if class_attr is None:
+                class_attr = []
+            if isinstance(class_attr, str):
+                class_attr = [class_attr]
+            cls = " ".join(class_attr).lower()
+
+            tid = (t.get("id") or "")
+            if tid is None:
+                tid = ""
+            tid = str(tid).lower()
+        except Exception:
+            continue
+
         if any(p in cls for p in bad_patterns) or any(p in tid for p in bad_patterns):
             try:
                 t.decompose()
@@ -387,7 +399,6 @@ def scrape_single_article(
             progress_callback(0, 0, f"FAIL: {input_url} (no response)")
         return None
 
-    # Soft redirect to listing is the #1 suspect in Twoich screenach:
     if getattr(resp, "soft_redirect_to_listing", False):
         if progress_callback:
             progress_callback(0, 0, f"SKIP (soft-redirect→listing): {input_url} → {getattr(resp, 'final_url', '')}")
@@ -418,6 +429,7 @@ def scrape_single_article(
         body = soup.find("body")
         if not isinstance(body, Tag):
             return None
+
         _remove_boilerplate(body)
         best = _select_best_block(body)
         markdown_text = _html_to_markdown(str(best))
@@ -428,7 +440,7 @@ def scrape_single_article(
             progress_callback(0, 0, f"SKIP (thin content {wc}w): {input_url}")
         return None
 
-    # KLUCZ: zapisujemy URL wejściowy, nie końcowy (żeby nie „skleiło” wszystkiego w /blog/)
+    # zapisujemy URL wejściowy (żeby redirecty nie sklejały wszystkiego w jeden)
     return {
         "URL": input_url,
         "H1": h1 or "",
