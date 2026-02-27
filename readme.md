@@ -21,3 +21,9 @@ python -m venv .venv
 # macOS/Linux: source .venv/bin/activate
 
 pip install -r requirements.txt
+### Przykład użycia
+1. Uruchom aplikację:
+   streamlit run app.py
+2. W polu „Adres strony” wpisz np.:
+   https://marczak.me
+3. Kliknij „Start” i pobierz CSV oraz raport podobieństw.
