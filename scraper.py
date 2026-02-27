@@ -1,342 +1,559 @@
 from __future__ import annotations
 
+import time
+import re
+import urllib.parse
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Optional
+from typing import Callable, Optional, Set, List, Dict, Tuple
 
-import numpy as np
+import requests
+from bs4 import BeautifulSoup, Tag
 import pandas as pd
+from markdownify import markdownify as md
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+try:
+    import trafilatura
+except Exception:
+    trafilatura = None
+
+ProgressCallback = Callable[[int, int, str], None]
+
+MIN_WORDS_ARTICLE_MARKDOWN = 120  # realny artykuł zwykle ma dużo więcej; listingi łatwiej odsiać
+MAX_REDIRECTS = 3
 
 
-# -------------------------
-# Interpretacja i konfiguracja (user-friendly)
-# -------------------------
 @dataclass
-class SimilarityConfig:
-    """
-    similarity_threshold_pct:
-        Próg podobieństwa w % (0–100). Np. 30 oznacza 30%.
-
-    method:
-        - "word_tfidf": podobieństwo tematyczne (czy teksty są o tym samym)
-        - "char_tfidf": podobieństwo tekstowe/szablonowe (czy mają dużo identycznych fragmentów)
-        - "hybrid": łączy oba (najlepsze do kanibalizacji SEO)
-
-    boilerplate_line_df_pct:
-        Linie/fragmenty występujące w >= X% dokumentów uznajemy za boilerplate i usuwamy.
-        To mocno poprawia jakość porównań (CTA, stopki, menu, standardowe bloki).
-    """
-    similarity_threshold_pct: float = 30.0
-    method: str = "hybrid"
-    boilerplate_line_df_pct: float = 25.0  # usuń linie wspólne dla >=25% stron
-    min_words_per_doc: int = 40            # odrzuć "prawie puste" treści
-    max_pairs: int = 2000                  # limit, żeby nie wysadzić UI
-
-
-# -------------------------
-# Tekst: czyszczenie i boilerplate removal
-# -------------------------
-def _normalize_text(t: str) -> str:
-    t = (t or "").replace("\r", "\n")
-    t = "\n".join([line.strip() for line in t.split("\n")])
-    # usuń nadmiar pustych linii
-    while "\n\n\n" in t:
-        t = t.replace("\n\n\n", "\n\n")
-    return t.strip()
-
-
-def _split_markdown_lines(t: str) -> List[str]:
-    # Rozbijamy po liniach – w markdownzie to sensowna jednostka boilerplate
-    lines = [ln.strip() for ln in (t or "").split("\n")]
-    # odfiltruj bardzo krótkie “śmieciowe” linie
-    lines = [ln for ln in lines if len(ln) >= 20]
-    return lines
-
-
-def remove_boilerplate_lines(texts: List[str], df_threshold_pct: float) -> List[str]:
-    """
-    Usuwa linie (po normalizacji), które powtarzają się w >= df_threshold_pct dokumentów.
-    """
-    if not texts:
-        return texts
-
-    df_threshold_pct = float(df_threshold_pct)
-    n = len(texts)
-    if n < 3:
-        # dla małej liczby dokumentów boilerplate bywa trudny do oszacowania
-        return [_normalize_text(t) for t in texts]
-
-    # policz w ilu dokumentach występuje dana linia
-    line_df: Dict[str, int] = {}
-    docs_lines: List[List[str]] = []
-    for t in texts:
-        t = _normalize_text(t)
-        lines = _split_markdown_lines(t)
-        docs_lines.append(lines)
-        uniq = set(lines)
-        for ln in uniq:
-            line_df[ln] = line_df.get(ln, 0) + 1
-
-    df_cut = max(2, int(np.ceil((df_threshold_pct / 100.0) * n)))
-    boiler = {ln for ln, c in line_df.items() if c >= df_cut}
-
-    cleaned_texts: List[str] = []
-    for lines in docs_lines:
-        kept = [ln for ln in lines if ln not in boiler]
-        cleaned_texts.append("\n".join(kept).strip())
-
-    return cleaned_texts
-
-
-def _filter_too_short(texts: List[str], min_words: int) -> Tuple[List[str], List[int]]:
-    """
-    Zwraca:
-    - texts_filtered: lista tekstów (też zachowuje indeksy, ale puste dla odrzuconych)
-    - valid_idx: indeksy dokumentów, które mają >= min_words słów
-    """
-    out = []
-    valid_idx = []
-    for i, t in enumerate(texts):
-        t = (t or "").strip()
-        if len(t.split()) >= int(min_words):
-            out.append(t)
-            valid_idx.append(i)
-        else:
-            out.append("")  # zachowujemy pozycję
-    return out, valid_idx
-
-
-# -------------------------
-# Similarity: word TF-IDF / char TF-IDF / hybrid
-# -------------------------
-def _cosine_sim_matrix_from_vectors(X) -> np.ndarray:
-    return cosine_similarity(X)
-
-
-def _word_tfidf_sim(texts: List[str]) -> np.ndarray:
-    vect = TfidfVectorizer(
-        lowercase=True,
-        strip_accents="unicode",
-        ngram_range=(1, 2),
-        min_df=1,
-        max_df=0.95,
+class ScrapeConfig:
+    base_url: str
+    max_pages: int = 200
+    timeout: int = 20
+    delay: float = 0.6
+    max_depth: int = 3
+    user_agent: str = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
     )
-    X = vect.fit_transform(texts)
-    return _cosine_sim_matrix_from_vectors(X)
+    same_subdomain_only: bool = True
 
 
-def _char_tfidf_sim(texts: List[str]) -> np.ndarray:
-    # char_wb redukuje szum (bardziej “w obrębie słów”)
-    vect = TfidfVectorizer(
-        analyzer="char_wb",
-        ngram_range=(4, 6),
-        min_df=1,
-        max_df=1.0,
-    )
-    X = vect.fit_transform(texts)
-    return _cosine_sim_matrix_from_vectors(X)
+# -------------------------
+# URL utilities
+# -------------------------
+def _normalize_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return url
+    parsed = urllib.parse.urlsplit(url)
+    parsed = parsed._replace(fragment="")
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    parsed = parsed._replace(path=path)
+    return urllib.parse.urlunsplit(parsed)
 
 
-def build_similarity_matrices(
-    raw_texts: List[str],
-    cfg: SimilarityConfig
-) -> Dict[str, np.ndarray]:
+def _get_domain_parts(url: str) -> Tuple[str, str]:
+    netloc = urllib.parse.urlsplit(url).netloc.lower()
+    parts = [p for p in netloc.split(".") if p]
+    root = ".".join(parts[-2:]) if len(parts) >= 2 else netloc
+    return netloc, root
+
+
+def _is_internal(url: str, base_url: str, same_subdomain_only: bool) -> bool:
+    u = urllib.parse.urlsplit(url)
+    if not u.scheme.startswith("http"):
+        return False
+    base_netloc, base_root = _get_domain_parts(base_url)
+    netloc, root = _get_domain_parts(url)
+    if same_subdomain_only:
+        return netloc == base_netloc
+    return root == base_root
+
+
+def _likely_article_url(url: str) -> bool:
+    u = urllib.parse.urlsplit(url)
+    path = (u.path or "/").lower()
+
+    if path in ("/", ""):
+        return False
+
+    bad = [
+        "/tag/", "/tags/", "/category/", "/kategoria/", "/author/", "/autor/",
+        "/search", "/szukaj", "/page/", "/strona/",
+        "/wp-admin", "/wp-login",
+        "/feed", "/rss", "/atom",
+        "/xmlrpc.php",
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".pdf", ".zip",
+    ]
+    if any(b in path for b in bad):
+        return False
+
+    good = ["/blog/", "/articles/", "/artykul/", "/artykuly/", "/poradnik/", "/wiedza/", "/news/", "/aktualnosci/"]
+    if any(g in path for g in good):
+        return True
+
+    if re.search(r"/20\d{2}/\d{1,2}/", path):
+        return True
+
+    depth = len([p for p in path.split("/") if p])
+    if depth >= 2 and "-" in path:
+        return True
+
+    return depth >= 2
+
+
+def _is_listing_like(url: str) -> bool:
     """
-    Zwraca słownik macierzy NxN:
-    - "word"
-    - "char"
-    - "hybrid"
-    Każda macierz jest dopasowana do kolejności wejściowej.
+    Detect typical list pages to treat redirects as "not an article".
     """
-    # 1) normalize
-    texts = [_normalize_text(t) for t in raw_texts]
+    path = (urllib.parse.urlsplit(url).path or "/").lower()
+    if path.rstrip("/") in ("/blog", "/blog/"):
+        return True
+    if any(x in path for x in ["/tag/", "/category/", "/kategoria/", "/page/", "/strona/"]):
+        return True
+    return False
 
-    # 2) boilerplate removal
-    texts = remove_boilerplate_lines(texts, df_threshold_pct=cfg.boilerplate_line_df_pct)
 
-    # 3) filter too short (keep indices)
-    texts, valid_idx = _filter_too_short(texts, min_words=cfg.min_words_per_doc)
-    n = len(texts)
+# -------------------------
+# Networking (redirect-aware)
+# -------------------------
+def _browser_headers(cfg: ScrapeConfig, referer: Optional[str] = None) -> Dict[str, str]:
+    h = {
+        "User-Agent": cfg.user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    if referer:
+        h["Referer"] = referer
+    return h
 
-    if n == 0:
-        return {"word": np.zeros((0, 0)), "char": np.zeros((0, 0)), "hybrid": np.zeros((0, 0))}
-    if n == 1:
-        one = np.array([[1.0]], dtype=float)
-        return {"word": one.copy(), "char": one.copy(), "hybrid": one.copy()}
 
-    # jeśli prawie wszystko puste po filtrze
-    if len(valid_idx) <= 1:
-        eye = np.eye(n, dtype=float)
-        return {"word": eye.copy(), "char": eye.copy(), "hybrid": eye.copy()}
-
-    # liczymy tylko na valid_idx, potem wklejamy do NxN
-    valid_texts = [texts[i] for i in valid_idx]
-
-    # word sim
+def _safe_get_no_redirect(session: requests.Session, url: str, cfg: ScrapeConfig, referer: Optional[str] = None) -> Optional[requests.Response]:
     try:
-        word_small = _word_tfidf_sim(valid_texts)
-    except ValueError:
-        # fallback: bez max_df (przy mikrozbiorach)
-        vect = TfidfVectorizer(
-            lowercase=True,
-            strip_accents="unicode",
-            ngram_range=(1, 2),
-            min_df=1,
-            max_df=1.0,
+        resp = session.get(
+            url,
+            timeout=cfg.timeout,
+            headers=_browser_headers(cfg, referer=referer),
+            allow_redirects=False,  # kluczowe
         )
-        X = vect.fit_transform(valid_texts)
-        word_small = cosine_similarity(X)
+        return resp
+    except requests.RequestException:
+        return None
 
-    # char sim
-    char_small = _char_tfidf_sim(valid_texts)
 
-    # wbuduj do NxN
-    word = np.eye(n, dtype=float)
-    char = np.eye(n, dtype=float)
+def _follow_redirects_manually(
+    session: requests.Session,
+    url: str,
+    cfg: ScrapeConfig,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Optional[requests.Response]:
+    """
+    Fetch URL without auto-redirects; follow up to MAX_REDIRECTS only within the same site.
+    If redirect leads to listing-like URL (e.g., /blog/), treat as soft-block and return that response
+    (caller may decide to skip).
+    """
+    current = _normalize_url(url)
+    referer = cfg.base_url
 
-    for a_pos, a_idx in enumerate(valid_idx):
-        for b_pos, b_idx in enumerate(valid_idx):
-            word[a_idx, b_idx] = float(word_small[a_pos, b_pos])
-            char[a_idx, b_idx] = float(char_small[a_pos, b_pos])
+    for hop in range(MAX_REDIRECTS + 1):
+        resp = _safe_get_no_redirect(session, current, cfg, referer=referer)
+        if resp is None:
+            return None
 
-    # hybrid: ważone – priorytet “tematyczny”, ale podbite przez podobieństwo tekstowe
-    # (to działa dobrze do kanibalizacji SEO)
-    hybrid = (0.65 * word) + (0.35 * char)
+        # 2xx OK
+        if 200 <= resp.status_code < 300:
+            # Attach a helpful attribute: final_url
+            resp.final_url = current  # type: ignore[attr-defined]
+            return resp
 
-    return {"word": word, "char": char, "hybrid": hybrid}
+        # redirects
+        if resp.status_code in (301, 302, 303, 307, 308):
+            loc = resp.headers.get("Location") or ""
+            nxt = _normalize_url(urllib.parse.urljoin(current, loc))
+
+            if progress_callback:
+                progress_callback(0, 0, f"Redirect {resp.status_code}: {current} → {nxt}")
+
+            # block external jumps
+            if not _is_internal(nxt, cfg.base_url, cfg.same_subdomain_only):
+                resp.final_url = current  # type: ignore[attr-defined]
+                return resp
+
+            # if redirected to listing-like page, likely bot/consent soft redirect
+            if _is_listing_like(nxt):
+                # Return response but mark final_url as the listing target
+                resp.final_url = nxt  # type: ignore[attr-defined]
+                resp.soft_redirect_to_listing = True  # type: ignore[attr-defined]
+                return resp
+
+            referer = current
+            current = nxt
+            continue
+
+        # other codes (403/503 etc.)
+        resp.final_url = current  # type: ignore[attr-defined]
+        return resp
+
+    return None
 
 
 # -------------------------
-# Raport: pary + grupy
+# Extraction helpers
 # -------------------------
-def similarity_pairs_report(
-    df: pd.DataFrame,
-    sim: np.ndarray,
-    threshold_pct: float,
-    max_pairs: int = 2000,
-) -> pd.DataFrame:
-    """
-    Zwraca pary URL-i o podobieństwie >= threshold_pct.
-    threshold_pct jest w % (0–100).
-    """
-    if df is None or df.empty:
-        return pd.DataFrame(columns=[
-            "url_a", "title_a", "h1_a",
-            "url_b", "title_b", "h1_b",
-            "similarity_%"
-        ])
+def _words(s: str) -> int:
+    return len((s or "").split())
 
-    thr = float(threshold_pct) / 100.0
 
-    urls = df["URL"].astype(str).tolist()
-    titles = df["title"].astype(str).tolist()
-    h1s = df["H1"].astype(str).tolist()
+def _extract_h1(soup: BeautifulSoup) -> str:
+    h1 = soup.find("h1")
+    if isinstance(h1, Tag):
+        return h1.get_text(" ", strip=True)
+    return ""
 
-    n = len(urls)
-    rows = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            s = float(sim[i, j])
-            if s >= thr:
-                rows.append({
-                    "url_a": urls[i],
-                    "title_a": titles[i],
-                    "h1_a": h1s[i],
-                    "url_b": urls[j],
-                    "title_b": titles[j],
-                    "h1_b": h1s[j],
-                    "similarity_%": round(s * 100, 2),
-                })
 
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
+def _extract_title(soup: BeautifulSoup) -> str:
+    if soup.title and soup.title.string:
+        return soup.title.string.strip()
+    og = soup.find("meta", attrs={"property": "og:title"})
+    if og and og.get("content"):
+        return str(og.get("content")).strip()
+    return ""
 
-    out = out.sort_values("similarity_%", ascending=False).reset_index(drop=True)
-    if len(out) > int(max_pairs):
-        out = out.head(int(max_pairs)).copy()
+
+def _html_to_markdown(html_fragment: str) -> str:
+    text = md(html_fragment, heading_style="ATX", bullets="-")
+    text = re.sub(r"\n{3,}", "\n\n", (text or "")).strip()
+    return text
+
+
+def _extract_markdown_trafilatura(html: str, url: str) -> str:
+    if trafilatura is None:
+        return ""
+    try:
+        md_text = trafilatura.extract(
+            html,
+            url=url,
+            output_format="markdown",
+            include_formatting=True,
+            include_links=False,
+            include_images=False,
+            favor_precision=False,
+        )
+        return (md_text or "").strip()
+    except Exception:
+        return ""
+
+
+def _remove_boilerplate(body: Tag) -> None:
+    for tname in ["script", "style", "noscript", "svg"]:
+        for t in body.find_all(tname):
+            try:
+                t.decompose()
+            except Exception:
+                pass
+    for tname in ["nav", "footer", "header", "aside", "form"]:
+        for t in body.find_all(tname):
+            try:
+                t.decompose()
+            except Exception:
+                pass
+
+    bad_patterns = [
+        "cookie", "consent", "gdpr",
+        "newsletter", "subscribe",
+        "share", "social",
+        "breadcrumb",
+        "comment", "comments",
+        "related",
+        "modal", "popup",
+        "banner", "ads", "advert",
+        "pagination", "pager",
+        "sidebar",
+    ]
+    for t in body.find_all(True):
+        cls = " ".join(t.get("class", [])).lower()
+        tid = (t.get("id") or "").lower()
+        if any(p in cls for p in bad_patterns) or any(p in tid for p in bad_patterns):
+            try:
+                t.decompose()
+            except Exception:
+                pass
+
+
+def _select_best_block(body: Tag) -> Tag:
+    candidates: List[Tag] = []
+    for sel in ["article", "main", "section", "div"]:
+        for t in body.find_all(sel):
+            if not isinstance(t, Tag):
+                continue
+            tw = _words(t.get_text(" ", strip=True))
+            if tw >= 120:
+                candidates.append(t)
+    if not candidates:
+        return body
+
+    def link_words(t: Tag) -> int:
+        lw = 0
+        for a in t.find_all("a"):
+            lw += _words(a.get_text(" ", strip=True))
+        return lw
+
+    def score(t: Tag) -> float:
+        tw = _words(t.get_text(" ", strip=True))
+        lw = link_words(t)
+        density = tw / (lw + 1.0)
+        return density * (1.0 + min(2.0, tw / 800.0))
+
+    return max(candidates, key=score)
+
+
+# -------------------------
+# URL discovery
+# -------------------------
+def _discover_urls_via_sitemap(session: requests.Session, cfg: ScrapeConfig) -> List[str]:
+    base = cfg.base_url.rstrip("/")
+    candidates = [f"{base}/sitemap.xml", f"{base}/sitemap_index.xml"]
+    found: List[str] = []
+
+    for sm_url in candidates:
+        resp = _follow_redirects_manually(session, sm_url, cfg)
+        if not resp or not getattr(resp, "text", None):
+            continue
+        if resp.status_code >= 400:
+            continue
+
+        xml = BeautifulSoup(resp.text, "xml")
+        locs = [loc.get_text(strip=True) for loc in xml.find_all("loc")]
+        locs = [_normalize_url(u) for u in locs if u]
+
+        nested = [u for u in locs if ("sitemap" in u.lower() and u.lower().endswith(".xml"))]
+        if nested:
+            for nested_sm in nested[:200]:
+                r2 = _follow_redirects_manually(session, nested_sm, cfg)
+                if not r2 or not getattr(r2, "text", None) or r2.status_code >= 400:
+                    continue
+                x2 = BeautifulSoup(r2.text, "xml")
+                nested_locs = [l.get_text(strip=True) for l in x2.find_all("loc")]
+                for u in nested_locs:
+                    u = _normalize_url(u)
+                    if _is_internal(u, cfg.base_url, cfg.same_subdomain_only) and _likely_article_url(u):
+                        found.append(u)
+                if len(found) >= cfg.max_pages:
+                    break
+        else:
+            for u in locs:
+                if _is_internal(u, cfg.base_url, cfg.same_subdomain_only) and _likely_article_url(u):
+                    found.append(u)
+
+        if found:
+            break
+
+    seen = set()
+    out = []
+    for u in found:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
     return out
 
 
-def similarity_groups_report(
-    df: pd.DataFrame,
-    sim: np.ndarray,
-    threshold_pct: float,
+def discover_article_urls(
+    session: requests.Session,
+    cfg: ScrapeConfig,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> List[str]:
+    if progress_callback:
+        progress_callback(0, cfg.max_pages, "Próbuję wykryć URL-e przez sitemap…")
+    urls = _discover_urls_via_sitemap(session, cfg)
+    return urls[: cfg.max_pages]
+
+
+# -------------------------
+# Article scraping
+# -------------------------
+def scrape_single_article(
+    session: requests.Session,
+    url: str,
+    cfg: ScrapeConfig,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Optional[Dict[str, str]]:
+    input_url = _normalize_url(url)
+
+    resp = _follow_redirects_manually(session, input_url, cfg, progress_callback=progress_callback)
+    if resp is None:
+        if progress_callback:
+            progress_callback(0, 0, f"FAIL: {input_url} (no response)")
+        return None
+
+    # Soft redirect to listing is the #1 suspect in Twoich screenach:
+    if getattr(resp, "soft_redirect_to_listing", False):
+        if progress_callback:
+            progress_callback(0, 0, f"SKIP (soft-redirect→listing): {input_url} → {getattr(resp, 'final_url', '')}")
+        return None
+
+    if resp.status_code >= 400:
+        if progress_callback:
+            progress_callback(0, 0, f"SKIP (HTTP {resp.status_code}): {input_url}")
+        return None
+
+    ctype = (resp.headers.get("Content-Type") or "").lower()
+    if "text/html" not in ctype and "application/xhtml+xml" not in ctype:
+        if progress_callback:
+            progress_callback(0, 0, f"SKIP (non-HTML {ctype}): {input_url}")
+        return None
+
+    html = resp.text
+    soup = BeautifulSoup(html, "lxml")
+
+    h1 = _extract_h1(soup)
+    title = _extract_title(soup)
+
+    # 1) Trafiatura (jeśli jest)
+    markdown_text = _extract_markdown_trafilatura(html, url=input_url)
+
+    # 2) Fallback
+    if _words(markdown_text) < MIN_WORDS_ARTICLE_MARKDOWN:
+        body = soup.find("body")
+        if not isinstance(body, Tag):
+            return None
+        _remove_boilerplate(body)
+        best = _select_best_block(body)
+        markdown_text = _html_to_markdown(str(best))
+
+    wc = _words(markdown_text)
+    if wc < MIN_WORDS_ARTICLE_MARKDOWN:
+        if progress_callback:
+            progress_callback(0, 0, f"SKIP (thin content {wc}w): {input_url}")
+        return None
+
+    # KLUCZ: zapisujemy URL wejściowy, nie końcowy (żeby nie „skleiło” wszystkiego w /blog/)
+    return {
+        "URL": input_url,
+        "H1": h1 or "",
+        "title": title or "",
+        "treść w Markdown": markdown_text or "",
+    }
+
+
+def scrape_site_articles(
+    base_url: str,
+    max_pages: int = 200,
+    timeout: int = 20,
+    delay: float = 0.6,
+    max_depth: int = 3,
+    user_agent: str = "Mozilla/5.0 (compatible; SEOContentAuditor/1.0)",
+    same_subdomain_only: bool = True,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> pd.DataFrame:
-    """
-    Buduje grupy (connected components) dla krawędzi sim>=thr.
-    Zwraca wiersze: group_id, size, urls (newline separated).
-    """
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["group_id", "size", "urls"])
-
-    thr = float(threshold_pct) / 100.0
-    urls = df["URL"].astype(str).tolist()
-    n = len(urls)
-
-    # adjacency list
-    adj = [[] for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1, n):
-            if float(sim[i, j]) >= thr:
-                adj[i].append(j)
-                adj[j].append(i)
-
-    visited = [False] * n
-    groups: List[List[int]] = []
-
-    for i in range(n):
-        if visited[i]:
-            continue
-        # BFS/DFS component
-        stack = [i]
-        comp = []
-        visited[i] = True
-        while stack:
-            v = stack.pop()
-            comp.append(v)
-            for nb in adj[v]:
-                if not visited[nb]:
-                    visited[nb] = True
-                    stack.append(nb)
-        if len(comp) >= 2:  # grupy sensowne dopiero od 2 elementów
-            groups.append(sorted(comp))
-
-    # sort by size desc
-    groups.sort(key=lambda g: len(g), reverse=True)
-
-    rows = []
-    for gid, comp in enumerate(groups, start=1):
-        rows.append({
-            "group_id": gid,
-            "size": len(comp),
-            "urls": "\n".join(urls[i] for i in comp),
-        })
-
-    return pd.DataFrame(rows, columns=["group_id", "size", "urls"])
-
-
-# -------------------------
-# Tekst instrukcji (dla nietechnicznych)
-# -------------------------
-def interpretation_help_text() -> str:
-    return (
-        "### Jak rozumieć „podobieństwo treści” (procenty)\n\n"
-        "**To NIE jest ocena jakości tekstu.** To tylko miara tego, jak bardzo dwa artykuły są do siebie podobne.\n\n"
-        "#### Co oznacza próg (np. 30%)?\n"
-        "- Ustawiając **30%**, prosisz narzędzie: *„Pokaż mi pary artykułów, które są podobne co najmniej w 30%”*.\n"
-        "- Im **wyższy próg**, tym mniej wyników (ale bardziej „oczywistych”).\n"
-        "- Im **niższy próg**, tym więcej wyników (częściej dotyczy overlapu tematycznego).\n\n"
-        "#### Jakie progi ustawiać w praktyce (kanibalizacja SEO)?\n"
-        "- **20–30%**: często wykrywa *podobieństwo tematu* (dobre do szukania kanibalizacji).\n"
-        "- **30–45%**: zwykle *mocne nakładanie tematów* albo podobna struktura.\n"
-        "- **45%+**: często bardzo podobne teksty / duże fragmenty wspólne.\n\n"
-        "#### Dlaczego czasem nic nie wychodzi przy 50%?\n"
-        "Bo dwa artykuły mogą dotyczyć podobnego zagadnienia, ale być napisane innymi słowami. Wtedy podobieństwo tematyczne "
-        "często mieści się np. w zakresie **20–40%**, a nie 50%.\n\n"
-        "#### Co robi tryb „hybrid” (zalecany)?\n"
-        "- Łączy porównanie *tematu* (słowa) i *fragmentów tekstu/szablonów* (znaki).\n"
-        "- Dzięki temu lepiej wychwytuje realną kanibalizację i jednocześnie redukuje fałszywe alarmy od powtarzalnych stopki/CTA.\n"
+    cfg = ScrapeConfig(
+        base_url=base_url,
+        max_pages=max_pages,
+        timeout=timeout,
+        delay=delay,
+        max_depth=max_depth,
+        user_agent=user_agent,
+        same_subdomain_only=same_subdomain_only,
     )
+
+    session = requests.Session()
+
+    urls = discover_article_urls(session, cfg, progress_callback=progress_callback)
+    if not urls:
+        return pd.DataFrame(columns=["URL", "H1", "title", "treść w Markdown"])
+
+    records: List[Dict[str, str]] = []
+    total = min(len(urls), cfg.max_pages)
+
+    for i, u in enumerate(urls[:total], start=1):
+        if progress_callback:
+            progress_callback(i - 1, total, f"Pobieram ({i}/{total}): {u}")
+
+        rec = scrape_single_article(session, u, cfg, progress_callback=progress_callback)
+        if rec:
+            records.append(rec)
+
+        time.sleep(cfg.delay)
+
+    df = pd.DataFrame(records, columns=["URL", "H1", "title", "treść w Markdown"])
+    df = df.drop_duplicates(subset=["URL"]).reset_index(drop=True)
+    return df
+
+
+def scrape_articles_from_urls(
+    base_url: str,
+    urls: list[str],
+    max_pages: int = 200,
+    timeout: int = 20,
+    delay: float = 0.6,
+    user_agent: str = "Mozilla/5.0 (compatible; SEOContentAuditor/1.0)",
+    same_subdomain_only: bool = True,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> pd.DataFrame:
+    cfg = ScrapeConfig(
+        base_url=base_url,
+        max_pages=max_pages,
+        timeout=timeout,
+        delay=delay,
+        max_depth=1,
+        user_agent=user_agent,
+        same_subdomain_only=same_subdomain_only,
+    )
+
+    session = requests.Session()
+
+    clean_urls = [u for u in urls if u and isinstance(u, str)]
+    clean_urls = [_normalize_url(u) for u in clean_urls]
+    clean_urls = [u for u in clean_urls if _is_internal(u, cfg.base_url, cfg.same_subdomain_only)]
+
+    seen = set()
+    final_urls = []
+    for u in clean_urls:
+        if u not in seen:
+            seen.add(u)
+            final_urls.append(u)
+        if len(final_urls) >= cfg.max_pages:
+            break
+
+    records: List[Dict[str, str]] = []
+    total = len(final_urls)
+
+    for i, u in enumerate(final_urls, start=1):
+        if progress_callback:
+            progress_callback(i - 1, total, f"Pobieram ({i}/{total}): {u}")
+
+        rec = scrape_single_article(session, u, cfg, progress_callback=progress_callback)
+        if rec:
+            records.append(rec)
+
+        time.sleep(cfg.delay)
+
+    df = pd.DataFrame(records, columns=["URL", "H1", "title", "treść w Markdown"])
+    df = df.drop_duplicates(subset=["URL"]).reset_index(drop=True)
+    return df
+
+
+# -------------------------
+# Public wrappers (for app.py)
+# -------------------------
+def normalize_url_public(url: str) -> str:
+    return _normalize_url(url)
+
+
+def likely_article_url_public(url: str) -> bool:
+    return _likely_article_url(url)
+
+
+def filter_internal_urls_public(urls: list[str], base_url: str, same_subdomain_only: bool) -> list[str]:
+    out = []
+    for u in urls:
+        if _is_internal(u, base_url, same_subdomain_only):
+            out.append(u)
+    seen = set()
+    final = []
+    for u in out:
+        if u not in seen:
+            seen.add(u)
+            final.append(u)
+    return final
