@@ -1,5 +1,4 @@
 import io
-import re
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -20,14 +19,7 @@ from analyzer import (
     interpretation_help_text,
 )
 
-# -------------------------
-# Streamlit page config
-# -------------------------
-st.set_page_config(
-    page_title="SEO Content Similarity & Cannibalization Audit",
-    layout="wide",
-)
-
+st.set_page_config(page_title="SEO Content Similarity & Cannibalization Audit", layout="wide")
 st.title("SEO: analiza podobieństwa treści i kanibalizacji (CSV: URL, H1, title, treść w Markdown)")
 
 st.markdown(
@@ -41,19 +33,56 @@ To narzędzie:
 )
 
 # -------------------------
-# Helpers
+# Helpers: encoding + mojibake fix
 # -------------------------
-def _safe_float(x, default=0.0):
+def _try_read_csv_with_encodings(uploaded_file) -> pd.DataFrame:
+    """
+    Próbuje odczytać CSV kilkoma typowymi encodingami.
+    Najczęściej działa: utf-8-sig.
+    """
+    raw = uploaded_file.getvalue()
+    encodings = ["utf-8-sig", "utf-8", "cp1250", "latin1"]
+    last_err = None
+    for enc in encodings:
+        try:
+            return pd.read_csv(io.BytesIO(raw), encoding=enc)
+        except Exception as e:
+            last_err = e
+    raise last_err
+
+
+def _fix_mojibake(s: str) -> str:
+    """
+    Naprawia najczęstszy przypadek: UTF-8 zdekodowane jako latin1/cp1252,
+    co daje: 'Å›', 'Ã³' itd.
+    Jeżeli tekst jest OK, zwraca bez zmian.
+    """
+    if not isinstance(s, str) or not s:
+        return s
+    # szybka heurystyka: jeśli ma typowe sekwencje krzaków, próbujemy naprawy
+    bad_markers = ["Ã", "Å", "Ä", "â", "Ê", "Ë", "Ð", "Þ"]
+    if not any(m in s for m in bad_markers):
+        return s
     try:
-        return float(x)
+        repaired = s.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
+        # jeśli po naprawie wciąż wygląda źle, zostaw oryginał
+        if repaired and repaired != s:
+            return repaired
+        return s
     except Exception:
-        return float(default)
+        return s
+
+
+def _fix_dataframe_text(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for c in cols:
+        if c in out.columns:
+            out[c] = out[c].astype(str).apply(_fix_mojibake)
+    return out
+
 
 def _read_urls_from_uploaded_csv(file) -> list[str]:
-    """
-    Akceptuje CSV z kolumną 'URL' albo pierwszą kolumną jako URL.
-    """
-    df = pd.read_csv(file)
+    df = _try_read_csv_with_encodings(file)
     if df.empty:
         return []
     if "URL" in df.columns:
@@ -63,10 +92,8 @@ def _read_urls_from_uploaded_csv(file) -> list[str]:
     urls = [u.strip() for u in urls if isinstance(u, str) and u.strip()]
     return urls
 
+
 def _extract_urls_from_text(text: str) -> list[str]:
-    """
-    Zbiera URL-e z textarea (każda linia = URL; toleruje śmieci).
-    """
     if not text:
         return []
     lines = [ln.strip() for ln in text.splitlines()]
@@ -74,14 +101,13 @@ def _extract_urls_from_text(text: str) -> list[str]:
     for ln in lines:
         if not ln:
             continue
-        # prosta walidacja
         if ln.startswith("http://") or ln.startswith("https://"):
             urls.append(ln)
     return urls
 
+
 def _progress_callback_factory(status_el, bar_el):
     def cb(done, total, message):
-        # total może być 0 w callbackach diagnostycznych – obsłuż
         if total and total > 0:
             bar_el.progress(min(1.0, max(0.0, done / total)))
             status_el.write(message)
@@ -89,17 +115,16 @@ def _progress_callback_factory(status_el, bar_el):
             status_el.write(message)
     return cb
 
+
 def _download_csv_button(df: pd.DataFrame, label: str, filename: str):
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label=label,
-        data=csv_bytes,
-        file_name=filename,
-        mime="text/csv",
-    )
+    """
+    Zapis w utf-8-sig: działa w Excelu bez krzaków.
+    """
+    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(label=label, data=csv_bytes, file_name=filename, mime="text/csv")
+
 
 def _plot_similarity_hist(sim: np.ndarray, title: str):
-    # bierzemy tylko górny trójkąt bez przekątnej
     if sim.size == 0:
         st.info("Brak danych do wykresu.")
         return
@@ -111,7 +136,6 @@ def _plot_similarity_hist(sim: np.ndarray, title: str):
     if not vals:
         st.info("Brak par do wykresu.")
         return
-
     fig = plt.figure()
     plt.hist(vals, bins=30)
     plt.title(title)
@@ -121,10 +145,9 @@ def _plot_similarity_hist(sim: np.ndarray, title: str):
 
 
 # -------------------------
-# Sidebar: input options
+# Sidebar
 # -------------------------
 st.sidebar.header("1) Dane wejściowe")
-
 base_url = st.sidebar.text_input(
     "Adres strony (base URL)",
     value="https://marczak.me",
@@ -141,29 +164,9 @@ mode = st.sidebar.radio(
     index=0,
 )
 
-max_pages = st.sidebar.number_input(
-    "Limit URL-i / artykułów",
-    min_value=1,
-    max_value=2000,
-    value=200,
-    step=10,
-)
-
-delay = st.sidebar.slider(
-    "Opóźnienie między requestami (sekundy)",
-    min_value=0.0,
-    max_value=3.0,
-    value=0.6,
-    step=0.1,
-)
-
-timeout = st.sidebar.number_input(
-    "Timeout requestu (sekundy)",
-    min_value=5,
-    max_value=120,
-    value=20,
-    step=5,
-)
+max_pages = st.sidebar.number_input("Limit URL-i / artykułów", 1, 2000, 200, 10)
+delay = st.sidebar.slider("Opóźnienie między requestami (sekundy)", 0.0, 3.0, 0.6, 0.1)
+timeout = st.sidebar.number_input("Timeout requestu (sekundy)", 5, 120, 20, 5)
 
 same_subdomain_only = st.sidebar.checkbox(
     "Tylko ta sama subdomena (stricte ten sam host)",
@@ -172,8 +175,6 @@ same_subdomain_only = st.sidebar.checkbox(
 )
 
 st.sidebar.header("2) Ustawienia podobieństwa (w %)")
-st.sidebar.markdown("To są progi w **procentach (0–100)** – wygodne dla nietechnicznych.")
-
 method = st.sidebar.selectbox(
     "Metoda porównania",
     ["hybrid", "word_tfidf", "char_tfidf"],
@@ -181,53 +182,19 @@ method = st.sidebar.selectbox(
     help="Hybrid jest zwykle najlepszy do kanibalizacji SEO.",
 )
 
-threshold_pct = st.sidebar.slider(
-    "Próg podobieństwa (%)",
-    min_value=0,
-    max_value=100,
-    value=30,
-    step=1,
-    help="Np. 30% pokaże pary podobne co najmniej w 30%.",
-)
-
-boiler_df_pct = st.sidebar.slider(
-    "Usuwanie powtarzalnych fragmentów (boilerplate) – próg (%)",
-    min_value=5,
-    max_value=60,
-    value=25,
-    step=5,
-    help="25% oznacza: usuń linie, które pojawiają się w >=25% dokumentów.",
-)
-
-min_words = st.sidebar.number_input(
-    "Minimalna liczba słów w dokumencie (po czyszczeniu)",
-    min_value=10,
-    max_value=500,
-    value=40,
-    step=10,
-)
-
-max_pairs = st.sidebar.number_input(
-    "Limit par w raporcie",
-    min_value=100,
-    max_value=20000,
-    value=2000,
-    step=100,
-)
+threshold_pct = st.sidebar.slider("Próg podobieństwa (%)", 0, 100, 30, 1)
+boiler_df_pct = st.sidebar.slider("Usuwanie boilerplate – próg (%)", 5, 60, 25, 5)
+min_words = st.sidebar.number_input("Min. liczba słów (po czyszczeniu)", 10, 500, 40, 10)
+max_pairs = st.sidebar.number_input("Limit par w raporcie", 100, 20000, 2000, 100)
 
 st.sidebar.header("3) Uruchomienie")
 run_btn = st.sidebar.button("🚀 Start: pobierz i policz podobieństwo", type="primary")
 
 
-# -------------------------
-# Main: explanation for non-technical users
-# -------------------------
 with st.expander("Instrukcja: jak rozumieć próg podobieństwa (dla nietechnicznych)", expanded=True):
     st.markdown(interpretation_help_text())
 
-# -------------------------
-# Optional: manual URLs input
-# -------------------------
+
 manual_urls_text = ""
 uploaded_csv = None
 
@@ -239,11 +206,15 @@ if mode == "Wklej URL-e ręcznie":
     )
 
 if mode == "Wgraj CSV z URL-ami":
-    uploaded_csv = st.file_uploader("Wgraj CSV z URL-ami (kolumna 'URL' lub pierwsza kolumna)", type=["csv"])
+    uploaded_csv = st.file_uploader(
+        "Wgraj CSV z URL-ami (kolumna 'URL' lub pierwsza kolumna). "
+        "Obsługiwane kodowania: UTF-8 (zalecane), Windows-1250.",
+        type=["csv"],
+    )
 
 
 # -------------------------
-# Run pipeline
+# Run
 # -------------------------
 if run_btn:
     base_url = (base_url or "").strip()
@@ -255,7 +226,6 @@ if run_btn:
     bar = st.progress(0.0)
     cb = _progress_callback_factory(status, bar)
 
-    # 1) Get articles_df
     try:
         if mode == "Auto (sitemap/RSS) – pobierz artykuły ze strony":
             status.write("Start: auto-wykrywanie URL-i (sitemap/RSS) i pobieranie artykułów…")
@@ -317,19 +287,18 @@ if run_btn:
 
     bar.progress(1.0)
 
-    # basic validation
     if articles_df is None or articles_df.empty:
-        st.warning("Nie udało się pobrać żadnych artykułów. Sprawdź URL, blokady anty-bot, limit, itp.")
+        st.warning("Nie udało się pobrać żadnych artykułów.")
         st.stop()
 
-    # 2) Show and download articles CSV
+    # Napraw polskie znaki w danych (na wszelki wypadek) przed wyświetleniem i eksportem
+    articles_df = _fix_dataframe_text(articles_df, ["H1", "title", "treść w Markdown"])
+
     st.subheader("1) Dane artykułów (CSV: URL, H1, title, treść w Markdown)")
     st.dataframe(articles_df, use_container_width=True, height=300)
-    _download_csv_button(articles_df, "⬇️ Pobierz CSV z artykułami", "articles.csv")
+    _download_csv_button(articles_df, "⬇️ Pobierz CSV z artykułami (UTF-8)", "articles.csv")
 
-    # 3) Similarity analysis
     st.subheader("2) Analiza podobieństwa treści (kanibalizacja)")
-
     cfg = SimilarityConfig(
         similarity_threshold_pct=float(threshold_pct),
         method=method,
@@ -346,13 +315,11 @@ if run_btn:
     sim = mats["hybrid"] if method == "hybrid" else mats["word"] if method == "word_tfidf" else mats["char"]
 
     colA, colB = st.columns([1, 1])
-
     with colA:
         st.markdown("**Wykres rozkładu podobieństw (wszystkie pary)**")
         _plot_similarity_hist(sim, title=f"Similarity distribution ({method})")
 
     with colB:
-        # szybkie statystyki
         n = sim.shape[0]
         if n >= 2:
             vals = []
@@ -367,34 +334,25 @@ if run_btn:
         else:
             st.info("Za mało dokumentów do statystyk.")
 
-    # Reports
-    pairs_df = similarity_pairs_report(
-        articles_df,
-        sim,
-        threshold_pct=cfg.similarity_threshold_pct,
-        max_pairs=cfg.max_pairs,
-    )
-    groups_df = similarity_groups_report(
-        articles_df,
-        sim,
-        threshold_pct=cfg.similarity_threshold_pct,
-    )
+    pairs_df = similarity_pairs_report(articles_df, sim, threshold_pct=cfg.similarity_threshold_pct, max_pairs=cfg.max_pairs)
+    groups_df = similarity_groups_report(articles_df, sim, threshold_pct=cfg.similarity_threshold_pct)
+
+    # Fix mojibake in reports too
+    pairs_df = _fix_dataframe_text(pairs_df, ["title_a", "h1_a", "title_b", "h1_b"])
+    groups_df = _fix_dataframe_text(groups_df, ["urls"])
 
     st.markdown(f"### 2.1 Pary artykułów powyżej progu: **{threshold_pct}%** ({method})")
     if pairs_df is None or pairs_df.empty:
-        st.info(
-            "Brak par powyżej progu. "
-            "Spróbuj obniżyć próg (np. 20–30%) lub przełącz metodę na 'hybrid' (zalecane)."
-        )
+        st.info("Brak par powyżej progu. Obniż próg (np. 20–30%) albo użyj 'hybrid'.")
     else:
         st.dataframe(pairs_df, use_container_width=True, height=350)
-        _download_csv_button(pairs_df, "⬇️ Pobierz CSV: pary podobnych artykułów", "similarity_pairs.csv")
+        _download_csv_button(pairs_df, "⬇️ Pobierz CSV: pary podobnych artykułów (UTF-8)", "similarity_pairs.csv")
 
-    st.markdown(f"### 2.2 Grupy (klastry) potencjalnej kanibalizacji powyżej progu: **{threshold_pct}%** ({method})")
+    st.markdown(f"### 2.2 Grupy (klastry) powyżej progu: **{threshold_pct}%** ({method})")
     if groups_df is None or groups_df.empty:
-        st.info("Brak grup (minimum 2 URL-e połączone podobieństwem >= próg).")
+        st.info("Brak grup (min. 2 URL-e połączone podobieństwem >= próg).")
     else:
         st.dataframe(groups_df, use_container_width=True, height=300)
-        _download_csv_button(groups_df, "⬇️ Pobierz CSV: grupy kanibalizacji", "similarity_groups.csv")
+        _download_csv_button(groups_df, "⬇️ Pobierz CSV: grupy kanibalizacji (UTF-8)", "similarity_groups.csv")
 
     st.success("Gotowe ✅")
