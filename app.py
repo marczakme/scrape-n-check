@@ -1,405 +1,400 @@
-import os
-import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-import streamlit as st
+import io
+import re
 import pandas as pd
 import numpy as np
-import requests
-from bs4 import BeautifulSoup
+import streamlit as st
+import matplotlib.pyplot as plt
 
 from scraper import (
     scrape_site_articles,
     scrape_articles_from_urls,
     normalize_url_public,
     filter_internal_urls_public,
-    likely_article_url_public,
 )
+
 from analyzer import (
-    compute_similarity_report,
-    build_similarity_matrix,
+    SimilarityConfig,
+    build_similarity_matrices,
+    similarity_pairs_report,
+    similarity_groups_report,
+    interpretation_help_text,
 )
 
-st.set_page_config(page_title="SEO Cannibalization Auditor", layout="wide")
-st.title("SEO Cannibalization Auditor (Scrape → Markdown CSV → Similarity)")
-
-with st.expander("Uwaga / dobre praktyki", expanded=False):
-    st.markdown(
-        """
-- Narzędzie pobiera treści ze stron WWW. Upewnij się, że masz prawo do scrapowania analizowanej witryny.
-- W praktyce warto respektować robots.txt i nie przeciążać serwera (rate limiting jest wbudowany).
-- Wyniki podobieństwa to sygnał do audytu — nie zawsze oznaczają realną kanibalizację.
-        """.strip()
-    )
-
-# --- Inputs
-colA, colB, colC = st.columns([2, 1, 1])
-
-with colA:
-    base_url = st.text_input(
-        "Adres strony (np. https://hipoteczny.pl)",
-        value="https://hipoteczny.pl",
-        placeholder="https://example.com",
-    )
-
-with colB:
-    max_pages = st.number_input(
-        "Max liczba artykułów",
-        min_value=5,
-        max_value=5000,
-        value=200,
-        step=5,
-        help="Limit bezpieczeństwa. Przy dużych serwisach zacznij od 100–300.",
-    )
-
-with colC:
-    similarity_threshold = st.slider(
-        "Próg podobieństwa (%)",
-        min_value=50,
-        max_value=95,
-        value=70,
-        step=1,
-        help="Pary powyżej progu traktuj jako potencjalną kanibalizację.",
-    )
-
-advanced = st.expander("Ustawienia zaawansowane", expanded=False)
-with advanced:
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        request_timeout = st.number_input("Timeout requestów (s)", 5, 60, 20, 1)
-    with c2:
-        delay_seconds = st.number_input("Opóźnienie między requestami (s)", 0.0, 5.0, 0.6, 0.1)
-    with c3:
-        crawl_depth = st.number_input("Maks. głębokość crawl (fallback)", 1, 8, 3, 1)
-    with c4:
-        same_subdomain_only = st.checkbox(
-            "Tylko ten sam subdomen",
-            value=True,
-            help="Jeśli odznaczysz, zbierze linki z całej domeny głównej (root domain).",
-        )
-
-    ua = st.text_input(
-        "User-Agent",
-        value="Mozilla/5.0 (compatible; SEOContentAuditor/1.0; +https://github.com/your-repo)",
-    )
-
-# --- URL source selection
-st.subheader("Źródło URL-i do analizy")
-
-source_mode = st.radio(
-    "Wybierz skąd pobrać listę URL-i",
-    options=[
-        "Auto (sitemap → RSS → crawl)",
-        "Własny sitemap.xml (wklej URL)",
-        "Wgraj CSV z URL-ami",
-        "Wklej listę URL-i ręcznie",
-    ],
-    index=0,
-    horizontal=False,
+# -------------------------
+# Streamlit page config
+# -------------------------
+st.set_page_config(
+    page_title="SEO Content Similarity & Cannibalization Audit",
+    layout="wide",
 )
 
-sitemap_url = None
-uploaded_csv = None
-manual_urls_text = None
+st.title("SEO: analiza podobieństwa treści i kanibalizacji (CSV: URL, H1, title, treść w Markdown)")
 
-if source_mode == "Własny sitemap.xml (wklej URL)":
-    sitemap_url = st.text_input(
-        "URL do sitemap (np. https://example.com/sitemap.xml)",
-        value="",
-        placeholder="https://twojadomena.pl/sitemap.xml",
-    )
-    st.caption("Aplikacja wyciągnie wszystkie <loc> z tej sitemap i przefiltruje do URL-i artykułów.")
-
-elif source_mode == "Wgraj CSV z URL-ami":
-    uploaded_csv = st.file_uploader(
-        "Wgraj CSV (kolumna `URL` lub pierwsza kolumna)",
-        type=["csv"],
-        accept_multiple_files=False,
-    )
-    st.caption("CSV może zawierać dodatkowe kolumny — i tak pobierzemy tylko URL-e.")
-
-elif source_mode == "Wklej listę URL-i ręcznie":
-    manual_urls_text = st.text_area(
-        "Wklej URL-e (po jednym w linii)",
-        value="",
-        height=180,
-        placeholder="https://example.com/artykul-1\nhttps://example.com/artykul-2",
-    )
-
-# --- Helpers (in app) for sitemap parsing
-def extract_urls_from_sitemap_xml(sitemap_xml_text: str) -> list[str]:
+st.markdown(
     """
-    Reads XML and returns list of <loc> values. Handles sitemap index too (best-effort).
-    """
-    urls = []
-    xml = BeautifulSoup(sitemap_xml_text, "xml")
-    locs = [loc.get_text(strip=True) for loc in xml.find_all("loc")]
+To narzędzie:
+- pobiera treści artykułów ze strony (albo z Twojej listy URL),
+- zapisuje do CSV: **URL, H1, title, treść w Markdown**,
+- liczy podobieństwo treści różnymi metodami,
+- wskazuje pary i grupy potencjalnej kanibalizacji.
+"""
+)
 
-    # If this is a sitemap index, it will also have <loc> entries pointing to nested sitemaps.
-    # We'll return them and handle nesting in the next function.
-    for u in locs:
-        if u:
-            urls.append(u.strip())
+# -------------------------
+# Helpers
+# -------------------------
+def _safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
+
+def _read_urls_from_uploaded_csv(file) -> list[str]:
+    """
+    Akceptuje CSV z kolumną 'URL' albo pierwszą kolumną jako URL.
+    """
+    df = pd.read_csv(file)
+    if df.empty:
+        return []
+    if "URL" in df.columns:
+        urls = df["URL"].astype(str).tolist()
+    else:
+        urls = df.iloc[:, 0].astype(str).tolist()
+    urls = [u.strip() for u in urls if isinstance(u, str) and u.strip()]
     return urls
 
-def fetch_sitemap_urls(sitemap_url: str, timeout: int, ua: str, max_urls: int) -> list[str]:
+def _extract_urls_from_text(text: str) -> list[str]:
     """
-    Fetch sitemap.xml or sitemap index and return content URLs.
-    If it's an index (nested sitemaps), we fetch nested ones (limited).
+    Zbiera URL-e z textarea (każda linia = URL; toleruje śmieci).
     """
-    headers = {"User-Agent": ua}
-    try:
-        r = requests.get(sitemap_url, headers=headers, timeout=timeout, allow_redirects=True)
-        r.raise_for_status()
-    except Exception as e:
-        raise RuntimeError(f"Nie udało się pobrać sitemap: {sitemap_url}. Szczegóły: {e}")
+    if not text:
+        return []
+    lines = [ln.strip() for ln in text.splitlines()]
+    urls = []
+    for ln in lines:
+        if not ln:
+            continue
+        # prosta walidacja
+        if ln.startswith("http://") or ln.startswith("https://"):
+            urls.append(ln)
+    return urls
 
-    first_level = extract_urls_from_sitemap_xml(r.text)
-
-    # Heuristic: if many urls end with .xml and contain 'sitemap' => sitemap index
-    nested_candidates = [u for u in first_level if ("sitemap" in u.lower() and u.lower().endswith(".xml"))]
-
-    content_urls = []
-
-    if nested_candidates:
-        # fetch nested sitemaps (limit to avoid exploding)
-        for i, sm in enumerate(nested_candidates[:50], start=1):
-            try:
-                rr = requests.get(sm, headers=headers, timeout=timeout, allow_redirects=True)
-                rr.raise_for_status()
-            except Exception:
-                continue
-            nested_urls = extract_urls_from_sitemap_xml(rr.text)
-            content_urls.extend(nested_urls)
-            if len(content_urls) >= max_urls:
-                break
-    else:
-        content_urls = first_level
-
-    # Normalize + internal + likely article filter
-    content_urls = [normalize_url_public(u) for u in content_urls if u]
-    content_urls = filter_internal_urls_public(content_urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
-    content_urls = [u for u in content_urls if likely_article_url_public(u)]
-    # unique preserve order
-    seen = set()
-    out = []
-    for u in content_urls:
-        if u not in seen:
-            seen.add(u)
-            out.append(u)
-        if len(out) >= max_urls:
-            break
-    return out
-
-
-# --- Run
-run = st.button("🚀 Uruchom scrapowanie i analizę", type="primary")
-
-if "articles_df" not in st.session_state:
-    st.session_state["articles_df"] = None
-if "report_df" not in st.session_state:
-    st.session_state["report_df"] = None
-if "sim_matrix" not in st.session_state:
-    st.session_state["sim_matrix"] = None
-
-if run:
-    if not base_url or not base_url.startswith(("http://", "https://")):
-        st.error("Podaj poprawny URL zaczynający się od http:// lub https://")
-        st.stop()
-
-    status = st.status("Startuję…", expanded=True)
-    progress = st.progress(0)
-
-    def on_progress(done: int, total: int, message: str):
+def _progress_callback_factory(status_el, bar_el):
+    def cb(done, total, message):
+        # total może być 0 w callbackach diagnostycznych – obsłuż
         if total and total > 0:
-            progress.progress(min(1.0, done / total))
-        status.write(message)
-
-    try:
-        status.update(label="🔎 Przygotowuję listę URL-i…", state="running")
-
-        urls_to_scrape = None
-
-        if source_mode == "Auto (sitemap → RSS → crawl)":
-            urls_to_scrape = None  # handled inside scrape_site_articles()
-
-        elif source_mode == "Własny sitemap.xml (wklej URL)":
-            if not sitemap_url or not sitemap_url.startswith(("http://", "https://")):
-                st.error("Wklej poprawny URL do sitemap.xml")
-                st.stop()
-
-            status.write(f"Pobieram sitemap: {sitemap_url}")
-            urls_to_scrape = fetch_sitemap_urls(
-                sitemap_url=sitemap_url.strip(),
-                timeout=int(request_timeout),
-                ua=ua,
-                max_urls=int(max_pages),
-            )
-            if not urls_to_scrape:
-                st.warning("Nie udało się wyciągnąć URL-i z sitemap albo po filtrach lista jest pusta.")
-                st.stop()
-
-        elif source_mode == "Wgraj CSV z URL-ami":
-            if uploaded_csv is None:
-                st.error("Wgraj plik CSV z URL-ami.")
-                st.stop()
-            df_in = pd.read_csv(uploaded_csv)
-            if df_in.empty:
-                st.error("CSV jest pusty.")
-                st.stop()
-
-            if "URL" in df_in.columns:
-                raw_urls = df_in["URL"].astype(str).tolist()
-            else:
-                raw_urls = df_in.iloc[:, 0].astype(str).tolist()
-
-            raw_urls = [u.strip() for u in raw_urls if isinstance(u, str) and u.strip()]
-            raw_urls = [normalize_url_public(u) for u in raw_urls]
-            raw_urls = filter_internal_urls_public(raw_urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
-            urls_to_scrape = [u for u in raw_urls if likely_article_url_public(u)]
-            # unique + limit
-            seen = set()
-            tmp = []
-            for u in urls_to_scrape:
-                if u not in seen:
-                    seen.add(u)
-                    tmp.append(u)
-                if len(tmp) >= int(max_pages):
-                    break
-            urls_to_scrape = tmp
-
-            if not urls_to_scrape:
-                st.warning("Po filtrach (internal + heurystyka artykułu) lista URL-i jest pusta.")
-                st.stop()
-
-        elif source_mode == "Wklej listę URL-i ręcznie":
-            if not manual_urls_text or not manual_urls_text.strip():
-                st.error("Wklej przynajmniej jeden URL.")
-                st.stop()
-
-            raw_urls = [line.strip() for line in manual_urls_text.splitlines() if line.strip()]
-            raw_urls = [normalize_url_public(u) for u in raw_urls if u.startswith(("http://", "https://"))]
-            raw_urls = filter_internal_urls_public(raw_urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
-            urls_to_scrape = [u for u in raw_urls if likely_article_url_public(u)]
-            # unique + limit
-            seen = set()
-            tmp = []
-            for u in urls_to_scrape:
-                if u not in seen:
-                    seen.add(u)
-                    tmp.append(u)
-                if len(tmp) >= int(max_pages):
-                    break
-            urls_to_scrape = tmp
-
-            if not urls_to_scrape:
-                st.warning("Po filtrach (internal + heurystyka artykułu) lista URL-i jest pusta.")
-                st.stop()
-
-        # --- Scrape
-        status.update(label="🧲 Pobieram artykuły…", state="running")
-
-        if urls_to_scrape is None:
-            # Auto mode: internal discovery
-            articles_df = scrape_site_articles(
-                base_url=base_url,
-                max_pages=int(max_pages),
-                timeout=int(request_timeout),
-                delay=float(delay_seconds),
-                max_depth=int(crawl_depth),
-                user_agent=ua,
-                same_subdomain_only=bool(same_subdomain_only),
-                progress_callback=on_progress,
-            )
+            bar_el.progress(min(1.0, max(0.0, done / total)))
+            status_el.write(message)
         else:
-            status.write(f"Zidentyfikowane URL-e do scrapowania: {len(urls_to_scrape)}")
-            articles_df = scrape_articles_from_urls(
-                base_url=base_url,
-                urls=urls_to_scrape,
-                max_pages=int(max_pages),
-                timeout=int(request_timeout),
-                delay=float(delay_seconds),
-                user_agent=ua,
-                same_subdomain_only=bool(same_subdomain_only),
-                progress_callback=on_progress,
-            )
+            status_el.write(message)
+    return cb
 
-        if articles_df.empty:
-            status.update(label="Nie znaleziono artykułów lub nie udało się pobrać treści.", state="error")
-            st.stop()
-
-        st.session_state["articles_df"] = articles_df
-
-        # --- Similarity
-        status.update(label="🧠 Liczę podobieństwa…", state="running")
-        sim_matrix = build_similarity_matrix(articles_df["treść w Markdown"].fillna("").tolist())
-        report_df = compute_similarity_report(
-            articles_df=articles_df,
-            sim_matrix=sim_matrix,
-            threshold=float(similarity_threshold) / 100.0,
-        )
-
-        st.session_state["report_df"] = report_df
-        st.session_state["sim_matrix"] = sim_matrix
-
-        status.update(label="✅ Gotowe", state="complete")
-        progress.progress(1.0)
-
-    except Exception as e:
-        status.update(label="❌ Błąd", state="error")
-        st.exception(e)
-
-# --- Output
-articles_df = st.session_state.get("articles_df")
-report_df = st.session_state.get("report_df")
-sim_matrix = st.session_state.get("sim_matrix")
-
-if articles_df is not None:
-    st.subheader("1) Dane artykułów (CSV: URL, H1, title, treść w Markdown)")
-    st.dataframe(articles_df, use_container_width=True, height=350)
-
-    csv_bytes = articles_df.to_csv(index=False).encode("utf-8")
+def _download_csv_button(df: pd.DataFrame, label: str, filename: str):
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        "⬇️ Pobierz CSV z artykułami",
+        label=label,
         data=csv_bytes,
-        file_name="articles_markdown.csv",
+        file_name=filename,
         mime="text/csv",
     )
 
-if report_df is not None:
-    st.subheader("2) Potencjalna kanibalizacja (pary powyżej progu)")
-    if report_df.empty:
-        st.info("Brak par powyżej ustawionego progu.")
-    else:
-        st.dataframe(report_df, use_container_width=True, height=350)
-        rep_bytes = report_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "⬇️ Pobierz raport kanibalizacji (CSV)",
-            data=rep_bytes,
-            file_name="cannibalization_report.csv",
-            mime="text/csv",
-        )
-
-if sim_matrix is not None and articles_df is not None:
-    st.subheader("3) Wizualizacja podobieństwa (heatmap – top 60 URLi)")
-    st.caption("Dla czytelności pokazuję maks. 60 pierwszych artykułów.")
-
-    import matplotlib.pyplot as plt
-
-    n = min(60, sim_matrix.shape[0])
-    m = sim_matrix[:n, :n]
-    labels = [f"{i+1}" for i in range(n)]
+def _plot_similarity_hist(sim: np.ndarray, title: str):
+    # bierzemy tylko górny trójkąt bez przekątnej
+    if sim.size == 0:
+        st.info("Brak danych do wykresu.")
+        return
+    n = sim.shape[0]
+    vals = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            vals.append(float(sim[i, j]))
+    if not vals:
+        st.info("Brak par do wykresu.")
+        return
 
     fig = plt.figure()
-    plt.imshow(m, interpolation="nearest")
-    plt.colorbar()
-    plt.xticks(range(n), labels, rotation=90, fontsize=7)
-    plt.yticks(range(n), labels, fontsize=7)
-    plt.title("Cosine similarity (TF-IDF) – skrócona macierz")
-    plt.tight_layout()
+    plt.hist(vals, bins=30)
+    plt.title(title)
+    plt.xlabel("Podobieństwo (0–1)")
+    plt.ylabel("Liczba par")
     st.pyplot(fig)
 
-    with st.expander("Mapa indeksów → URL", expanded=False):
-        tmp = articles_df[["URL", "title"]].head(n).copy()
-        tmp.insert(0, "idx", np.arange(1, n + 1))
-        st.dataframe(tmp, use_container_width=True, height=300)
+
+# -------------------------
+# Sidebar: input options
+# -------------------------
+st.sidebar.header("1) Dane wejściowe")
+
+base_url = st.sidebar.text_input(
+    "Adres strony (base URL)",
+    value="https://marczak.me",
+    help="Podaj domenę startową. Przykład: https://marczak.me",
+)
+
+mode = st.sidebar.radio(
+    "Skąd wziąć URL-e do analizy?",
+    options=[
+        "Auto (sitemap/RSS) – pobierz artykuły ze strony",
+        "Wklej URL-e ręcznie",
+        "Wgraj CSV z URL-ami",
+    ],
+    index=0,
+)
+
+max_pages = st.sidebar.number_input(
+    "Limit URL-i / artykułów",
+    min_value=1,
+    max_value=2000,
+    value=200,
+    step=10,
+)
+
+delay = st.sidebar.slider(
+    "Opóźnienie między requestami (sekundy)",
+    min_value=0.0,
+    max_value=3.0,
+    value=0.6,
+    step=0.1,
+)
+
+timeout = st.sidebar.number_input(
+    "Timeout requestu (sekundy)",
+    min_value=5,
+    max_value=120,
+    value=20,
+    step=5,
+)
+
+same_subdomain_only = st.sidebar.checkbox(
+    "Tylko ta sama subdomena (stricte ten sam host)",
+    value=True,
+    help="Jeśli odznaczysz, scraper może brać też subdomeny w ramach tej samej domeny głównej.",
+)
+
+st.sidebar.header("2) Ustawienia podobieństwa (w %)")
+st.sidebar.markdown("To są progi w **procentach (0–100)** – wygodne dla nietechnicznych.")
+
+method = st.sidebar.selectbox(
+    "Metoda porównania",
+    ["hybrid", "word_tfidf", "char_tfidf"],
+    index=0,
+    help="Hybrid jest zwykle najlepszy do kanibalizacji SEO.",
+)
+
+threshold_pct = st.sidebar.slider(
+    "Próg podobieństwa (%)",
+    min_value=0,
+    max_value=100,
+    value=30,
+    step=1,
+    help="Np. 30% pokaże pary podobne co najmniej w 30%.",
+)
+
+boiler_df_pct = st.sidebar.slider(
+    "Usuwanie powtarzalnych fragmentów (boilerplate) – próg (%)",
+    min_value=5,
+    max_value=60,
+    value=25,
+    step=5,
+    help="25% oznacza: usuń linie, które pojawiają się w >=25% dokumentów.",
+)
+
+min_words = st.sidebar.number_input(
+    "Minimalna liczba słów w dokumencie (po czyszczeniu)",
+    min_value=10,
+    max_value=500,
+    value=40,
+    step=10,
+)
+
+max_pairs = st.sidebar.number_input(
+    "Limit par w raporcie",
+    min_value=100,
+    max_value=20000,
+    value=2000,
+    step=100,
+)
+
+st.sidebar.header("3) Uruchomienie")
+run_btn = st.sidebar.button("🚀 Start: pobierz i policz podobieństwo", type="primary")
+
+
+# -------------------------
+# Main: explanation for non-technical users
+# -------------------------
+with st.expander("Instrukcja: jak rozumieć próg podobieństwa (dla nietechnicznych)", expanded=True):
+    st.markdown(interpretation_help_text())
+
+# -------------------------
+# Optional: manual URLs input
+# -------------------------
+manual_urls_text = ""
+uploaded_csv = None
+
+if mode == "Wklej URL-e ręcznie":
+    manual_urls_text = st.text_area(
+        "Wklej URL-e (1 linia = 1 URL)",
+        height=180,
+        placeholder="https://marczak.me/jakis-artykul/\nhttps://marczak.me/inny-artykul/",
+    )
+
+if mode == "Wgraj CSV z URL-ami":
+    uploaded_csv = st.file_uploader("Wgraj CSV z URL-ami (kolumna 'URL' lub pierwsza kolumna)", type=["csv"])
+
+
+# -------------------------
+# Run pipeline
+# -------------------------
+if run_btn:
+    base_url = (base_url or "").strip()
+    if not (base_url.startswith("http://") or base_url.startswith("https://")):
+        st.error("Base URL musi zaczynać się od http:// lub https://")
+        st.stop()
+
+    status = st.empty()
+    bar = st.progress(0.0)
+    cb = _progress_callback_factory(status, bar)
+
+    # 1) Get articles_df
+    try:
+        if mode == "Auto (sitemap/RSS) – pobierz artykuły ze strony":
+            status.write("Start: auto-wykrywanie URL-i (sitemap/RSS) i pobieranie artykułów…")
+            articles_df = scrape_site_articles(
+                base_url=base_url,
+                max_pages=int(max_pages),
+                timeout=int(timeout),
+                delay=float(delay),
+                max_depth=3,
+                same_subdomain_only=bool(same_subdomain_only),
+                progress_callback=cb,
+            )
+
+        elif mode == "Wklej URL-e ręcznie":
+            urls = _extract_urls_from_text(manual_urls_text)
+            urls = [normalize_url_public(u) for u in urls]
+            urls = filter_internal_urls_public(urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
+            if not urls:
+                st.error("Nie wykryłam żadnych poprawnych URL-i do analizy.")
+                st.stop()
+
+            status.write(f"Start: pobieranie treści dla {len(urls)} URL-i…")
+            articles_df = scrape_articles_from_urls(
+                base_url=base_url,
+                urls=urls,
+                max_pages=int(max_pages),
+                timeout=int(timeout),
+                delay=float(delay),
+                same_subdomain_only=bool(same_subdomain_only),
+                progress_callback=cb,
+            )
+
+        else:  # CSV
+            if uploaded_csv is None:
+                st.error("Wgraj plik CSV z URL-ami.")
+                st.stop()
+
+            urls = _read_urls_from_uploaded_csv(uploaded_csv)
+            urls = [normalize_url_public(u) for u in urls]
+            urls = filter_internal_urls_public(urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
+            if not urls:
+                st.error("W CSV nie znalazłam URL-i pasujących do domeny / filtra.")
+                st.stop()
+
+            status.write(f"Start: pobieranie treści dla {len(urls)} URL-i z CSV…")
+            articles_df = scrape_articles_from_urls(
+                base_url=base_url,
+                urls=urls,
+                max_pages=int(max_pages),
+                timeout=int(timeout),
+                delay=float(delay),
+                same_subdomain_only=bool(same_subdomain_only),
+                progress_callback=cb,
+            )
+
+    except Exception as e:
+        st.exception(e)
+        st.stop()
+
+    bar.progress(1.0)
+
+    # basic validation
+    if articles_df is None or articles_df.empty:
+        st.warning("Nie udało się pobrać żadnych artykułów. Sprawdź URL, blokady anty-bot, limit, itp.")
+        st.stop()
+
+    # 2) Show and download articles CSV
+    st.subheader("1) Dane artykułów (CSV: URL, H1, title, treść w Markdown)")
+    st.dataframe(articles_df, use_container_width=True, height=300)
+    _download_csv_button(articles_df, "⬇️ Pobierz CSV z artykułami", "articles.csv")
+
+    # 3) Similarity analysis
+    st.subheader("2) Analiza podobieństwa treści (kanibalizacja)")
+
+    cfg = SimilarityConfig(
+        similarity_threshold_pct=float(threshold_pct),
+        method=method,
+        boilerplate_line_df_pct=float(boiler_df_pct),
+        min_words_per_doc=int(min_words),
+        max_pairs=int(max_pairs),
+    )
+
+    texts = articles_df["treść w Markdown"].fillna("").astype(str).tolist()
+
+    with st.spinner("Liczę podobieństwa (word/char/hybrid)…"):
+        mats = build_similarity_matrices(texts, cfg)
+
+    sim = mats["hybrid"] if method == "hybrid" else mats["word"] if method == "word_tfidf" else mats["char"]
+
+    colA, colB = st.columns([1, 1])
+
+    with colA:
+        st.markdown("**Wykres rozkładu podobieństw (wszystkie pary)**")
+        _plot_similarity_hist(sim, title=f"Similarity distribution ({method})")
+
+    with colB:
+        # szybkie statystyki
+        n = sim.shape[0]
+        if n >= 2:
+            vals = []
+            for i in range(n):
+                for j in range(i + 1, n):
+                    vals.append(float(sim[i, j]))
+            if vals:
+                st.metric("Maksymalne podobieństwo", f"{max(vals)*100:.1f}%")
+                st.metric("Średnie podobieństwo", f"{(sum(vals)/len(vals))*100:.1f}%")
+            else:
+                st.info("Brak par do statystyk.")
+        else:
+            st.info("Za mało dokumentów do statystyk.")
+
+    # Reports
+    pairs_df = similarity_pairs_report(
+        articles_df,
+        sim,
+        threshold_pct=cfg.similarity_threshold_pct,
+        max_pairs=cfg.max_pairs,
+    )
+    groups_df = similarity_groups_report(
+        articles_df,
+        sim,
+        threshold_pct=cfg.similarity_threshold_pct,
+    )
+
+    st.markdown(f"### 2.1 Pary artykułów powyżej progu: **{threshold_pct}%** ({method})")
+    if pairs_df is None or pairs_df.empty:
+        st.info(
+            "Brak par powyżej progu. "
+            "Spróbuj obniżyć próg (np. 20–30%) lub przełącz metodę na 'hybrid' (zalecane)."
+        )
+    else:
+        st.dataframe(pairs_df, use_container_width=True, height=350)
+        _download_csv_button(pairs_df, "⬇️ Pobierz CSV: pary podobnych artykułów", "similarity_pairs.csv")
+
+    st.markdown(f"### 2.2 Grupy (klastry) potencjalnej kanibalizacji powyżej progu: **{threshold_pct}%** ({method})")
+    if groups_df is None or groups_df.empty:
+        st.info("Brak grup (minimum 2 URL-e połączone podobieństwem >= próg).")
+    else:
+        st.dataframe(groups_df, use_container_width=True, height=300)
+        _download_csv_button(groups_df, "⬇️ Pobierz CSV: grupy kanibalizacji", "similarity_groups.csv")
+
+    st.success("Gotowe ✅")
