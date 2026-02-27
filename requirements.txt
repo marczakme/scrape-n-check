@@ -7,3 +7,4 @@ lxml
 markdownify
 scikit-learn
 matplotlib
+trafilatura
