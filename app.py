@@ -1,18 +1,26 @@
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
+from bs4 import BeautifulSoup
 
-from scraper import scrape_site_articles
+from scraper import (
+    scrape_site_articles,
+    scrape_articles_from_urls,
+    normalize_url_public,
+    filter_internal_urls_public,
+    likely_article_url_public,
+)
 from analyzer import (
     compute_similarity_report,
     build_similarity_matrix,
 )
 
-st.set_page_config(
-    page_title="SEO Cannibalization Auditor",
-    layout="wide",
-)
-
+st.set_page_config(page_title="SEO Cannibalization Auditor", layout="wide")
 st.title("SEO Cannibalization Auditor (Scrape → Markdown CSV → Similarity)")
 
 with st.expander("Uwaga / dobre praktyki", expanded=False):
@@ -24,6 +32,7 @@ with st.expander("Uwaga / dobre praktyki", expanded=False):
         """.strip()
     )
 
+# --- Inputs
 colA, colB, colC = st.columns([2, 1, 1])
 
 with colA:
@@ -61,12 +70,12 @@ with advanced:
     with c2:
         delay_seconds = st.number_input("Opóźnienie między requestami (s)", 0.0, 5.0, 0.6, 0.1)
     with c3:
-        crawl_depth = st.number_input("Maks. głębokość crawl", 1, 8, 3, 1)
+        crawl_depth = st.number_input("Maks. głębokość crawl (fallback)", 1, 8, 3, 1)
     with c4:
         same_subdomain_only = st.checkbox(
             "Tylko ten sam subdomen",
             value=True,
-            help="Jeśli odznaczysz, zbierze linki z całej domeny głównej.",
+            help="Jeśli odznaczysz, zbierze linki z całej domeny głównej (root domain).",
         )
 
     ua = st.text_input(
@@ -74,6 +83,116 @@ with advanced:
         value="Mozilla/5.0 (compatible; SEOContentAuditor/1.0; +https://github.com/your-repo)",
     )
 
+# --- URL source selection
+st.subheader("Źródło URL-i do analizy")
+
+source_mode = st.radio(
+    "Wybierz skąd pobrać listę URL-i",
+    options=[
+        "Auto (sitemap → RSS → crawl)",
+        "Własny sitemap.xml (wklej URL)",
+        "Wgraj CSV z URL-ami",
+        "Wklej listę URL-i ręcznie",
+    ],
+    index=0,
+    horizontal=False,
+)
+
+sitemap_url = None
+uploaded_csv = None
+manual_urls_text = None
+
+if source_mode == "Własny sitemap.xml (wklej URL)":
+    sitemap_url = st.text_input(
+        "URL do sitemap (np. https://example.com/sitemap.xml)",
+        value="",
+        placeholder="https://twojadomena.pl/sitemap.xml",
+    )
+    st.caption("Aplikacja wyciągnie wszystkie <loc> z tej sitemap i przefiltruje do URL-i artykułów.")
+
+elif source_mode == "Wgraj CSV z URL-ami":
+    uploaded_csv = st.file_uploader(
+        "Wgraj CSV (kolumna `URL` lub pierwsza kolumna)",
+        type=["csv"],
+        accept_multiple_files=False,
+    )
+    st.caption("CSV może zawierać dodatkowe kolumny — i tak pobierzemy tylko URL-e.")
+
+elif source_mode == "Wklej listę URL-i ręcznie":
+    manual_urls_text = st.text_area(
+        "Wklej URL-e (po jednym w linii)",
+        value="",
+        height=180,
+        placeholder="https://example.com/artykul-1\nhttps://example.com/artykul-2",
+    )
+
+# --- Helpers (in app) for sitemap parsing
+def extract_urls_from_sitemap_xml(sitemap_xml_text: str) -> list[str]:
+    """
+    Reads XML and returns list of <loc> values. Handles sitemap index too (best-effort).
+    """
+    urls = []
+    xml = BeautifulSoup(sitemap_xml_text, "xml")
+    locs = [loc.get_text(strip=True) for loc in xml.find_all("loc")]
+
+    # If this is a sitemap index, it will also have <loc> entries pointing to nested sitemaps.
+    # We'll return them and handle nesting in the next function.
+    for u in locs:
+        if u:
+            urls.append(u.strip())
+    return urls
+
+def fetch_sitemap_urls(sitemap_url: str, timeout: int, ua: str, max_urls: int) -> list[str]:
+    """
+    Fetch sitemap.xml or sitemap index and return content URLs.
+    If it's an index (nested sitemaps), we fetch nested ones (limited).
+    """
+    headers = {"User-Agent": ua}
+    try:
+        r = requests.get(sitemap_url, headers=headers, timeout=timeout, allow_redirects=True)
+        r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"Nie udało się pobrać sitemap: {sitemap_url}. Szczegóły: {e}")
+
+    first_level = extract_urls_from_sitemap_xml(r.text)
+
+    # Heuristic: if many urls end with .xml and contain 'sitemap' => sitemap index
+    nested_candidates = [u for u in first_level if ("sitemap" in u.lower() and u.lower().endswith(".xml"))]
+
+    content_urls = []
+
+    if nested_candidates:
+        # fetch nested sitemaps (limit to avoid exploding)
+        for i, sm in enumerate(nested_candidates[:50], start=1):
+            try:
+                rr = requests.get(sm, headers=headers, timeout=timeout, allow_redirects=True)
+                rr.raise_for_status()
+            except Exception:
+                continue
+            nested_urls = extract_urls_from_sitemap_xml(rr.text)
+            content_urls.extend(nested_urls)
+            if len(content_urls) >= max_urls:
+                break
+    else:
+        content_urls = first_level
+
+    # Normalize + internal + likely article filter
+    content_urls = [normalize_url_public(u) for u in content_urls if u]
+    content_urls = filter_internal_urls_public(content_urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
+    content_urls = [u for u in content_urls if likely_article_url_public(u)]
+    # unique preserve order
+    seen = set()
+    out = []
+    for u in content_urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+        if len(out) >= max_urls:
+            break
+    return out
+
+
+# --- Run
 run = st.button("🚀 Uruchom scrapowanie i analizę", type="primary")
 
 if "articles_df" not in st.session_state:
@@ -92,22 +211,118 @@ if run:
     progress = st.progress(0)
 
     def on_progress(done: int, total: int, message: str):
-        if total > 0:
+        if total and total > 0:
             progress.progress(min(1.0, done / total))
         status.write(message)
 
     try:
-        status.update(label="🔎 Wykrywam i pobieram artykuły…", state="running")
-        articles_df = scrape_site_articles(
-            base_url=base_url,
-            max_pages=int(max_pages),
-            timeout=int(request_timeout),
-            delay=float(delay_seconds),
-            max_depth=int(crawl_depth),
-            user_agent=ua,
-            same_subdomain_only=bool(same_subdomain_only),
-            progress_callback=on_progress,
-        )
+        status.update(label="🔎 Przygotowuję listę URL-i…", state="running")
+
+        urls_to_scrape = None
+
+        if source_mode == "Auto (sitemap → RSS → crawl)":
+            urls_to_scrape = None  # handled inside scrape_site_articles()
+
+        elif source_mode == "Własny sitemap.xml (wklej URL)":
+            if not sitemap_url or not sitemap_url.startswith(("http://", "https://")):
+                st.error("Wklej poprawny URL do sitemap.xml")
+                st.stop()
+
+            status.write(f"Pobieram sitemap: {sitemap_url}")
+            urls_to_scrape = fetch_sitemap_urls(
+                sitemap_url=sitemap_url.strip(),
+                timeout=int(request_timeout),
+                ua=ua,
+                max_urls=int(max_pages),
+            )
+            if not urls_to_scrape:
+                st.warning("Nie udało się wyciągnąć URL-i z sitemap albo po filtrach lista jest pusta.")
+                st.stop()
+
+        elif source_mode == "Wgraj CSV z URL-ami":
+            if uploaded_csv is None:
+                st.error("Wgraj plik CSV z URL-ami.")
+                st.stop()
+            df_in = pd.read_csv(uploaded_csv)
+            if df_in.empty:
+                st.error("CSV jest pusty.")
+                st.stop()
+
+            if "URL" in df_in.columns:
+                raw_urls = df_in["URL"].astype(str).tolist()
+            else:
+                raw_urls = df_in.iloc[:, 0].astype(str).tolist()
+
+            raw_urls = [u.strip() for u in raw_urls if isinstance(u, str) and u.strip()]
+            raw_urls = [normalize_url_public(u) for u in raw_urls]
+            raw_urls = filter_internal_urls_public(raw_urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
+            urls_to_scrape = [u for u in raw_urls if likely_article_url_public(u)]
+            # unique + limit
+            seen = set()
+            tmp = []
+            for u in urls_to_scrape:
+                if u not in seen:
+                    seen.add(u)
+                    tmp.append(u)
+                if len(tmp) >= int(max_pages):
+                    break
+            urls_to_scrape = tmp
+
+            if not urls_to_scrape:
+                st.warning("Po filtrach (internal + heurystyka artykułu) lista URL-i jest pusta.")
+                st.stop()
+
+        elif source_mode == "Wklej listę URL-i ręcznie":
+            if not manual_urls_text or not manual_urls_text.strip():
+                st.error("Wklej przynajmniej jeden URL.")
+                st.stop()
+
+            raw_urls = [line.strip() for line in manual_urls_text.splitlines() if line.strip()]
+            raw_urls = [normalize_url_public(u) for u in raw_urls if u.startswith(("http://", "https://"))]
+            raw_urls = filter_internal_urls_public(raw_urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
+            urls_to_scrape = [u for u in raw_urls if likely_article_url_public(u)]
+            # unique + limit
+            seen = set()
+            tmp = []
+            for u in urls_to_scrape:
+                if u not in seen:
+                    seen.add(u)
+                    tmp.append(u)
+                if len(tmp) >= int(max_pages):
+                    break
+            urls_to_scrape = tmp
+
+            if not urls_to_scrape:
+                st.warning("Po filtrach (internal + heurystyka artykułu) lista URL-i jest pusta.")
+                st.stop()
+
+        # --- Scrape
+        status.update(label="🧲 Pobieram artykuły…", state="running")
+
+        if urls_to_scrape is None:
+            # Auto mode: internal discovery
+            articles_df = scrape_site_articles(
+                base_url=base_url,
+                max_pages=int(max_pages),
+                timeout=int(request_timeout),
+                delay=float(delay_seconds),
+                max_depth=int(crawl_depth),
+                user_agent=ua,
+                same_subdomain_only=bool(same_subdomain_only),
+                progress_callback=on_progress,
+            )
+        else:
+            status.write(f"Zidentyfikowane URL-e do scrapowania: {len(urls_to_scrape)}")
+            articles_df = scrape_articles_from_urls(
+                base_url=base_url,
+                urls=urls_to_scrape,
+                max_pages=int(max_pages),
+                timeout=int(request_timeout),
+                delay=float(delay_seconds),
+                user_agent=ua,
+                same_subdomain_only=bool(same_subdomain_only),
+                progress_callback=on_progress,
+            )
 
         if articles_df.empty:
             status.update(label="Nie znaleziono artykułów lub nie udało się pobrać treści.", state="error")
@@ -115,8 +330,8 @@ if run:
 
         st.session_state["articles_df"] = articles_df
 
+        # --- Similarity
         status.update(label="🧠 Liczę podobieństwa…", state="running")
-        # Macierz (do wizualizacji) + raport par powyżej progu
         sim_matrix = build_similarity_matrix(articles_df["treść w Markdown"].fillna("").tolist())
         report_df = compute_similarity_report(
             articles_df=articles_df,
@@ -134,6 +349,7 @@ if run:
         status.update(label="❌ Błąd", state="error")
         st.exception(e)
 
+# --- Output
 articles_df = st.session_state.get("articles_df")
 report_df = st.session_state.get("report_df")
 sim_matrix = st.session_state.get("sim_matrix")
@@ -166,7 +382,7 @@ if report_df is not None:
 
 if sim_matrix is not None and articles_df is not None:
     st.subheader("3) Wizualizacja podobieństwa (heatmap – top 60 URLi)")
-    st.caption("Dla czytelności pokazuję maks. 60 pierwszych artykułów (możesz przefiltrować listę w kodzie).")
+    st.caption("Dla czytelności pokazuję maks. 60 pierwszych artykułów.")
 
     import matplotlib.pyplot as plt
 
