@@ -1,9 +1,9 @@
 streamlit
-beautifulsoup4
 requests
 pandas
-scikit-learn
-markdownify
 numpy
+beautifulsoup4
 lxml
+markdownify
+scikit-learn
 matplotlib
