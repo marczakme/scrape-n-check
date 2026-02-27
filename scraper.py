@@ -13,6 +13,10 @@ from markdownify import markdownify as md
 
 ProgressCallback = Callable[[int, int, str], None]
 
+# Spójne progi (Twoje życzenie: wszędzie ~50)
+MIN_WORDS_CONTENT_CONTAINER = 50   # minimalna liczba słów dla kontenera treści
+MIN_WORDS_ARTICLE_MARKDOWN = 50    # minimalna liczba słów w markdown, żeby uznać stronę za "artykuł"
+
 
 @dataclass
 class ScrapeConfig:
@@ -33,21 +37,17 @@ def _normalize_url(url: str) -> str:
     if not url:
         return url
     parsed = urllib.parse.urlsplit(url)
+    parsed = parsed._replace(fragment="")  # remove fragments
 
-    # remove fragments
-    parsed = parsed._replace(fragment="")
-
-    # normalize path (avoid //)
     path = re.sub(r"/{2,}", "/", parsed.path or "/")
     parsed = parsed._replace(path=path)
-
     return urllib.parse.urlunsplit(parsed)
 
 
 def _get_domain_parts(url: str) -> Tuple[str, str]:
     """
     Returns (netloc, "root domain" approximation).
-    Root domain is approximated as last two labels (works ok for many cases, but not all TLD rules).
+    Root domain is approximated as last two labels.
     """
     netloc = urllib.parse.urlsplit(url).netloc.lower()
     parts = [p for p in netloc.split(".") if p]
@@ -105,7 +105,6 @@ def _likely_article_url(url: str) -> bool:
     if depth >= 2 and "-" in path:
         return True
 
-    # Otherwise: allow some deeper URLs (but keep conservative)
     return depth >= 2
 
 
@@ -122,12 +121,6 @@ def _safe_get(session: requests.Session, url: str, cfg: ScrapeConfig) -> Optiona
         )
         if resp.status_code >= 400:
             return None
-
-        ctype = (resp.headers.get("Content-Type") or "").lower()
-        if "text/html" not in ctype and "application/xhtml+xml" not in ctype and "xml" not in ctype:
-            # for sitemaps feeds we still may accept xml, but html scraping uses html/xhtml
-            # the caller decides if xml is ok
-            return resp  # keep it for sitemap/rss parsing if needed
         return resp
     except requests.RequestException:
         return None
@@ -139,7 +132,7 @@ def _safe_get(session: requests.Session, url: str, cfg: ScrapeConfig) -> Optiona
 def _html_to_markdown(html_fragment: str) -> str:
     """
     Convert HTML to Markdown while preserving headings and lists.
-    IMPORTANT: markdownify (newer versions) cannot accept both 'strip' and 'convert'.
+    IMPORTANT: markdownify cannot accept both 'strip' and 'convert' in newer versions.
     We keep it simple and rely on prior BeautifulSoup cleanup + markdownify defaults.
     """
     text = md(
@@ -157,24 +150,51 @@ def _text_len(tag: Tag) -> int:
 
 def _pick_main_content(soup: BeautifulSoup) -> Optional[Tag]:
     """
-    Heuristic main-content extraction:
+    Robust content extraction with low, consistent thresholds:
     1) <article>
     2) <main>
-    3) best candidate among <div>/<section> by text length and link ratio
+    3) semantic hints (itemprop=articleBody, role=main, class/id includes content/post/entry/article)
+    4) best <div>/<section> by text length and link ratio
     """
+    # 1) <article>
     article = soup.find("article")
-    if isinstance(article, Tag) and _text_len(article) > 150:
+    if isinstance(article, Tag) and _text_len(article) >= MIN_WORDS_CONTENT_CONTAINER:
         return article
 
+    # 2) <main>
     main = soup.find("main")
-    if isinstance(main, Tag) and _text_len(main) > 150:
+    if isinstance(main, Tag) and _text_len(main) >= MIN_WORDS_CONTENT_CONTAINER:
         return main
 
+    # 3) semantic hints (still generic)
+    semantic_candidates: List[Tag] = []
+    semantic_selectors = [
+        '[itemprop="articleBody"]',
+        '[role="main"]',
+        '[class*="content"]',
+        '[id*="content"]',
+        '[class*="entry"]',
+        '[id*="entry"]',
+        '[class*="post"]',
+        '[id*="post"]',
+        '[class*="article"]',
+        '[id*="article"]',
+    ]
+    for sel in semantic_selectors:
+        for t in soup.select(sel):
+            if isinstance(t, Tag) and _text_len(t) >= MIN_WORDS_CONTENT_CONTAINER:
+                semantic_candidates.append(t)
+
+    if semantic_candidates:
+        return max(semantic_candidates, key=_text_len)
+
+    # 4) generic candidates: div/section
     candidates: List[Tag] = []
     for sel in ["div", "section"]:
         for t in soup.find_all(sel):
             if not isinstance(t, Tag):
                 continue
+
             classes = " ".join(t.get("class", [])).lower()
             tid = (t.get("id") or "").lower()
 
@@ -183,7 +203,7 @@ def _pick_main_content(soup: BeautifulSoup) -> Optional[Tag]:
                 continue
 
             txt_len = _text_len(t)
-            if txt_len < 250:
+            if txt_len < MIN_WORDS_CONTENT_CONTAINER:
                 continue
             candidates.append(t)
 
@@ -191,12 +211,12 @@ def _pick_main_content(soup: BeautifulSoup) -> Optional[Tag]:
         return None
 
     def score(t: Tag) -> float:
-        text = t.get_text(" ", strip=True)
-        text_words = len(text.split())
+        text_words = len(t.get_text(" ", strip=True).split())
         links_words = 0
         for a in t.find_all("a"):
             links_words += len(a.get_text(" ", strip=True).split())
-        link_ratio = (links_words / max(1, text_words))
+        link_ratio = links_words / max(1, text_words)
+        # Prefer long text, penalize too many links
         return float(text_words) * (1.0 - min(0.9, link_ratio))
 
     return max(candidates, key=score)
@@ -259,10 +279,9 @@ def _discover_urls_via_sitemap(session: requests.Session, cfg: ScrapeConfig) -> 
         locs = [loc.get_text(strip=True) for loc in xml.find_all("loc")]
         locs = [_normalize_url(u) for u in locs if u]
 
-        # sitemap index heuristic: many entries are sitemap-*.xml
         nested = [u for u in locs if ("sitemap" in u.lower() and u.lower().endswith(".xml"))]
         if nested:
-            for nested_sm in nested[:50]:
+            for nested_sm in nested[:80]:
                 r2 = _safe_get(session, nested_sm, cfg)
                 if not r2 or not r2.text:
                     continue
@@ -282,7 +301,6 @@ def _discover_urls_via_sitemap(session: requests.Session, cfg: ScrapeConfig) -> 
         if found:
             break
 
-    # unique preserve order
     seen = set()
     out = []
     for u in found:
@@ -308,12 +326,10 @@ def _discover_urls_via_rss(session: requests.Session, cfg: ScrapeConfig) -> List
             continue
 
         xml = BeautifulSoup(resp.text, "xml")
-
         for item in xml.find_all(["item", "entry"]):
             link = item.find("link")
             if link is None:
                 continue
-
             if link.get("href"):
                 u = link.get("href")
             else:
@@ -340,9 +356,6 @@ def _crawl_discover_article_urls(
     cfg: ScrapeConfig,
     progress_callback: Optional[ProgressCallback],
 ) -> List[str]:
-    """
-    Fallback: BFS crawl within domain to collect likely article URLs.
-    """
     start = _normalize_url(cfg.base_url)
     queue: List[Tuple[str, int]] = [(start, 0)]
     visited: Set[str] = set()
@@ -358,15 +371,14 @@ def _crawl_discover_article_urls(
             progress_callback(len(articles), cfg.max_pages, f"Crawl: {url} (depth={depth})")
 
         resp = _safe_get(session, url, cfg)
-        if resp is None or not resp.text:
+        if resp is None or not getattr(resp, "text", None):
             continue
 
         soup = BeautifulSoup(resp.text, "lxml")
 
-        # keep if looks like article + has enough main content
         if _likely_article_url(url):
             content = _pick_main_content(soup)
-            if content is not None and _text_len(content) > 250:
+            if content is not None and _text_len(content) >= MIN_WORDS_CONTENT_CONTAINER:
                 articles.append(url)
                 if len(articles) >= cfg.max_pages:
                     break
@@ -400,12 +412,6 @@ def discover_article_urls(
     cfg: ScrapeConfig,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> List[str]:
-    """
-    Discovery strategy:
-    1) sitemap.xml / sitemap_index.xml
-    2) RSS/Atom
-    3) crawl fallback
-    """
     if progress_callback:
         progress_callback(0, cfg.max_pages, "Próbuję wykryć URL-e przez sitemap…")
     urls = _discover_urls_via_sitemap(session, cfg)
@@ -420,8 +426,7 @@ def discover_article_urls(
 
     if progress_callback:
         progress_callback(0, cfg.max_pages, "Brak RSS. Przechodzę do crawl (fallback)…")
-    urls = _crawl_discover_article_urls(session, cfg, progress_callback)
-    return urls[: cfg.max_pages]
+    return _crawl_discover_article_urls(session, cfg, progress_callback)[: cfg.max_pages]
 
 
 # -------------------------
@@ -432,7 +437,6 @@ def scrape_single_article(session: requests.Session, url: str, cfg: ScrapeConfig
     if resp is None or not getattr(resp, "text", None):
         return None
 
-    # If content-type isn't html, skip
     ctype = (resp.headers.get("Content-Type") or "").lower()
     if "text/html" not in ctype and "application/xhtml+xml" not in ctype:
         return None
@@ -447,9 +451,8 @@ def scrape_single_article(session: requests.Session, url: str, cfg: ScrapeConfig
     h1 = _extract_h1(soup, content_tag)
     title = _extract_title(soup)
 
-    # remove noisy blocks inside content
     if content_tag is not None:
-        # Remove obvious junk
+        # Remove obvious junk inside selected container
         for bad_sel in [
             "script", "style", "noscript",
             "nav", "footer", "header", "aside",
@@ -464,7 +467,6 @@ def scrape_single_article(session: requests.Session, url: str, cfg: ScrapeConfig
                 for t in content_tag.select(bad_sel):
                     t.decompose()
             except Exception:
-                # Some selectors may fail on weird HTML; ignore safely
                 pass
 
         html_fragment = str(content_tag)
@@ -473,8 +475,8 @@ def scrape_single_article(session: requests.Session, url: str, cfg: ScrapeConfig
 
     markdown_text = _html_to_markdown(html_fragment)
 
-    # minimal quality gate: skip ultra-short pages
-    if len(markdown_text.split()) < 80:
+    # QUALITY GATE: spójnie 50 słów
+    if len(markdown_text.split()) < MIN_WORDS_ARTICLE_MARKDOWN:
         return None
 
     return {
@@ -538,16 +540,12 @@ def scrape_articles_from_urls(
     same_subdomain_only: bool = True,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> pd.DataFrame:
-    """
-    Scrape articles from a provided list of URLs.
-    Output schema: URL, H1, title, treść w Markdown
-    """
     cfg = ScrapeConfig(
         base_url=base_url,
         max_pages=max_pages,
         timeout=timeout,
         delay=delay,
-        max_depth=1,  # unused here
+        max_depth=1,
         user_agent=user_agent,
         same_subdomain_only=same_subdomain_only,
     )
@@ -558,7 +556,6 @@ def scrape_articles_from_urls(
     clean_urls = [_normalize_url(u) for u in clean_urls]
     clean_urls = [u for u in clean_urls if _is_internal(u, cfg.base_url, cfg.same_subdomain_only)]
 
-    # unique preserve order + limit
     seen = set()
     final_urls = []
     for u in clean_urls:
@@ -606,7 +603,6 @@ def filter_internal_urls_public(urls: list[str], base_url: str, same_subdomain_o
         if _is_internal(u, base_url, same_subdomain_only):
             out.append(u)
 
-    # unique preserve order
     seen = set()
     final = []
     for u in out:
