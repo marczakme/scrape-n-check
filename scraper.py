@@ -13,9 +13,11 @@ from markdownify import markdownify as md
 
 ProgressCallback = Callable[[int, int, str], None]
 
-# Spójne progi (Twoje życzenie: wszędzie ~50)
-MIN_WORDS_CONTENT_CONTAINER = 50   # minimalna liczba słów dla kontenera treści
-MIN_WORDS_ARTICLE_MARKDOWN = 50    # minimalna liczba słów w markdown, żeby uznać stronę za "artykuł"
+# Progi (bardziej defensywne pod blogi)
+MIN_WORDS_ARTICLE_MARKDOWN = 80          # finalna treść (po czyszczeniu)
+MIN_WORDS_CANDIDATE_BLOCK = 120          # minimalna długość bloku DOM, żeby brać go pod uwagę
+LISTING_MAX_TEXT_WORDS = 220             # jeśli mało tekstu...
+LISTING_MIN_LINKS = 60                   # ...i dużo linków → listing
 
 
 @dataclass
@@ -37,18 +39,13 @@ def _normalize_url(url: str) -> str:
     if not url:
         return url
     parsed = urllib.parse.urlsplit(url)
-    parsed = parsed._replace(fragment="")  # remove fragments
-
+    parsed = parsed._replace(fragment="")
     path = re.sub(r"/{2,}", "/", parsed.path or "/")
     parsed = parsed._replace(path=path)
     return urllib.parse.urlunsplit(parsed)
 
 
 def _get_domain_parts(url: str) -> Tuple[str, str]:
-    """
-    Returns (netloc, "root domain" approximation).
-    Root domain is approximated as last two labels.
-    """
     netloc = urllib.parse.urlsplit(url).netloc.lower()
     parts = [p for p in netloc.split(".") if p]
     root = ".".join(parts[-2:]) if len(parts) >= 2 else netloc
@@ -59,27 +56,20 @@ def _is_internal(url: str, base_url: str, same_subdomain_only: bool) -> bool:
     u = urllib.parse.urlsplit(url)
     if not u.scheme.startswith("http"):
         return False
-
     base_netloc, base_root = _get_domain_parts(base_url)
     netloc, root = _get_domain_parts(url)
-
     if same_subdomain_only:
         return netloc == base_netloc
     return root == base_root
 
 
 def _likely_article_url(url: str) -> bool:
-    """
-    Heuristic: prefer URLs that look like content pages.
-    Keep it general + language agnostic.
-    """
     u = urllib.parse.urlsplit(url)
     path = (u.path or "/").lower()
 
     if path in ("/", ""):
         return False
 
-    # Exclude typical non-article endpoints
     bad = [
         "/tag/", "/tags/", "/category/", "/kategoria/", "/author/", "/autor/",
         "/search", "/szukaj", "/page/", "/strona/",
@@ -91,16 +81,13 @@ def _likely_article_url(url: str) -> bool:
     if any(b in path for b in bad):
         return False
 
-    # Positive cues
     good = ["/blog/", "/articles/", "/artykul/", "/artykuly/", "/poradnik/", "/wiedza/", "/news/", "/aktualnosci/"]
     if any(g in path for g in good):
         return True
 
-    # Date-like patterns: /2024/05/slug
     if re.search(r"/20\d{2}/\d{1,2}/", path):
         return True
 
-    # Slug-ish URL: deeper path and contains hyphen
     depth = len([p for p in path.split("/") if p])
     if depth >= 2 and "-" in path:
         return True
@@ -130,11 +117,6 @@ def _safe_get(session: requests.Session, url: str, cfg: ScrapeConfig) -> Optiona
 # HTML -> Markdown
 # -------------------------
 def _html_to_markdown(html_fragment: str) -> str:
-    """
-    Convert HTML to Markdown while preserving headings and lists.
-    IMPORTANT: markdownify cannot accept both 'strip' and 'convert' in newer versions.
-    We keep it simple and rely on prior BeautifulSoup cleanup + markdownify defaults.
-    """
     text = md(
         html_fragment,
         heading_style="ATX",
@@ -144,89 +126,115 @@ def _html_to_markdown(html_fragment: str) -> str:
     return text
 
 
-def _text_len(tag: Tag) -> int:
-    return len(" ".join(tag.get_text(" ", strip=True).split()))
+def _words(text: str) -> int:
+    return len((text or "").split())
 
 
-def _pick_main_content(soup: BeautifulSoup) -> Optional[Tag]:
+def _tag_text_words(tag: Tag) -> int:
+    return _words(tag.get_text(" ", strip=True))
+
+
+def _tag_link_words(tag: Tag) -> int:
+    lw = 0
+    for a in tag.find_all("a"):
+        lw += _words(a.get_text(" ", strip=True))
+    return lw
+
+
+def _remove_boilerplate(root: Tag) -> None:
     """
-    Robust content extraction with low, consistent thresholds:
-    1) <article>
-    2) <main>
-    3) semantic hints (itemprop=articleBody, role=main, class/id includes content/post/entry/article)
-    4) best <div>/<section> by text length and link ratio
+    Remove obvious non-content areas from the DOM tree.
+    Generic selectors only (no site hardcoding).
     """
-    # 1) <article>
-    article = soup.find("article")
-    if isinstance(article, Tag) and _text_len(article) >= MIN_WORDS_CONTENT_CONTAINER:
-        return article
+    # Tags often used for boilerplate
+    for tname in ["script", "style", "noscript", "svg"]:
+        for t in root.find_all(tname):
+            try:
+                t.decompose()
+            except Exception:
+                pass
 
-    # 2) <main>
-    main = soup.find("main")
-    if isinstance(main, Tag) and _text_len(main) >= MIN_WORDS_CONTENT_CONTAINER:
-        return main
+    for tname in ["nav", "footer", "header", "aside", "form"]:
+        for t in root.find_all(tname):
+            try:
+                t.decompose()
+            except Exception:
+                pass
 
-    # 3) semantic hints (still generic)
-    semantic_candidates: List[Tag] = []
+    # Generic class/id heuristics (cookie, share, related, etc.)
+    bad_patterns = [
+        "cookie", "consent", "gdpr",
+        "newsletter", "subscribe",
+        "share", "social",
+        "breadcrumb",
+        "comment", "comments",
+        "related",
+        "modal", "popup",
+        "banner", "ads", "advert",
+        "pagination", "pager",
+        "sidebar",
+    ]
+    # Remove nodes that match these patterns
+    for t in root.find_all(True):
+        cls = " ".join(t.get("class", [])).lower()
+        tid = (t.get("id") or "").lower()
+        if any(p in cls for p in bad_patterns) or any(p in tid for p in bad_patterns):
+            try:
+                t.decompose()
+            except Exception:
+                pass
+
+
+def _looks_like_listing(body: Tag) -> bool:
+    """
+    Detect listing pages: many links, little continuous text.
+    """
+    text_words = _tag_text_words(body)
+    link_count = len(body.find_all("a"))
+    return (text_words <= LISTING_MAX_TEXT_WORDS and link_count >= LISTING_MIN_LINKS)
+
+
+def _select_best_content_block(body: Tag) -> Tag:
+    """
+    Score DOM blocks by text density and size.
+    Return the best candidate; fallback to body.
+    """
+    candidates: List[Tag] = []
+
+    # Strong semantic hints first (still generic)
     semantic_selectors = [
+        "article",
+        "main",
         '[itemprop="articleBody"]',
         '[role="main"]',
-        '[class*="content"]',
-        '[id*="content"]',
-        '[class*="entry"]',
-        '[id*="entry"]',
-        '[class*="post"]',
-        '[id*="post"]',
-        '[class*="article"]',
-        '[id*="article"]',
     ]
     for sel in semantic_selectors:
-        for t in soup.select(sel):
-            if isinstance(t, Tag) and _text_len(t) >= MIN_WORDS_CONTENT_CONTAINER:
-                semantic_candidates.append(t)
+        for t in body.select(sel):
+            if isinstance(t, Tag) and _tag_text_words(t) >= MIN_WORDS_CANDIDATE_BLOCK:
+                candidates.append(t)
 
-    if semantic_candidates:
-        return max(semantic_candidates, key=_text_len)
-
-    # 4) generic candidates: div/section
-    candidates: List[Tag] = []
-    for sel in ["div", "section"]:
-        for t in soup.find_all(sel):
-            if not isinstance(t, Tag):
-                continue
-
-            classes = " ".join(t.get("class", [])).lower()
-            tid = (t.get("id") or "").lower()
-
-            bad = ["nav", "menu", "footer", "header", "sidebar", "cookie", "newsletter", "share", "breadcrumb", "comments", "related"]
-            if any(b in classes for b in bad) or any(b in tid for b in bad):
-                continue
-
-            txt_len = _text_len(t)
-            if txt_len < MIN_WORDS_CONTENT_CONTAINER:
-                continue
+    # Add generic blocks
+    for t in body.find_all(["div", "section", "article", "main"]):
+        if not isinstance(t, Tag):
+            continue
+        if _tag_text_words(t) >= MIN_WORDS_CANDIDATE_BLOCK:
             candidates.append(t)
 
     if not candidates:
-        return None
+        return body
 
     def score(t: Tag) -> float:
-        text_words = len(t.get_text(" ", strip=True).split())
-        links_words = 0
-        for a in t.find_all("a"):
-            links_words += len(a.get_text(" ", strip=True).split())
-        link_ratio = links_words / max(1, text_words)
-        # Prefer long text, penalize too many links
-        return float(text_words) * (1.0 - min(0.9, link_ratio))
+        tw = _tag_text_words(t)
+        lw = _tag_link_words(t)
+        # density: prefer more "non-link" text
+        density = tw / (lw + 1.0)
+        # slight preference for longer text
+        return density * (1.0 + min(2.0, tw / 800.0))
 
     return max(candidates, key=score)
 
 
-def _extract_h1(soup: BeautifulSoup, content: Optional[Tag]) -> str:
-    if content is not None:
-        h1 = content.find("h1")
-        if isinstance(h1, Tag):
-            return h1.get_text(" ", strip=True)
+def _extract_h1(soup: BeautifulSoup) -> str:
     h1 = soup.find("h1")
     if isinstance(h1, Tag):
         return h1.get_text(" ", strip=True)
@@ -281,7 +289,7 @@ def _discover_urls_via_sitemap(session: requests.Session, cfg: ScrapeConfig) -> 
 
         nested = [u for u in locs if ("sitemap" in u.lower() and u.lower().endswith(".xml"))]
         if nested:
-            for nested_sm in nested[:80]:
+            for nested_sm in nested[:120]:
                 r2 = _safe_get(session, nested_sm, cfg)
                 if not r2 or not r2.text:
                     continue
@@ -377,11 +385,13 @@ def _crawl_discover_article_urls(
         soup = BeautifulSoup(resp.text, "lxml")
 
         if _likely_article_url(url):
-            content = _pick_main_content(soup)
-            if content is not None and _text_len(content) >= MIN_WORDS_CONTENT_CONTAINER:
-                articles.append(url)
-                if len(articles) >= cfg.max_pages:
-                    break
+            body = soup.find("body")
+            if isinstance(body, Tag):
+                _remove_boilerplate(body)
+                if not _looks_like_listing(body):
+                    articles.append(url)
+                    if len(articles) >= cfg.max_pages:
+                        break
 
         if depth >= cfg.max_depth:
             continue
@@ -443,39 +453,23 @@ def scrape_single_article(session: requests.Session, url: str, cfg: ScrapeConfig
 
     soup = BeautifulSoup(resp.text, "lxml")
 
-    content_tag = _pick_main_content(soup)
-    if content_tag is None:
-        body = soup.find("body")
-        content_tag = body if isinstance(body, Tag) else None
+    # Jeśli strona wygląda jak listing, pomijamy (to właśnie łapało /blog/)
+    body = soup.find("body")
+    if not isinstance(body, Tag):
+        return None
 
-    h1 = _extract_h1(soup, content_tag)
+    _remove_boilerplate(body)
+
+    if _looks_like_listing(body):
+        return None
+
+    best = _select_best_content_block(body)
+
+    h1 = _extract_h1(soup)
     title = _extract_title(soup)
 
-    if content_tag is not None:
-        # Remove obvious junk inside selected container
-        for bad_sel in [
-            "script", "style", "noscript",
-            "nav", "footer", "header", "aside",
-            "[class*=cookie]", "[id*=cookie]",
-            "[class*=newsletter]", "[id*=newsletter]",
-            "[class*=share]", "[class*=social]",
-            "[class*=comment]", "[id*=comment]",
-            "[class*=related]", "[id*=related]",
-            "[class*=breadcrumb]", "[id*=breadcrumb]",
-        ]:
-            try:
-                for t in content_tag.select(bad_sel):
-                    t.decompose()
-            except Exception:
-                pass
+    markdown_text = _html_to_markdown(str(best))
 
-        html_fragment = str(content_tag)
-    else:
-        html_fragment = resp.text
-
-    markdown_text = _html_to_markdown(html_fragment)
-
-    # QUALITY GATE: spójnie 50 słów
     if len(markdown_text.split()) < MIN_WORDS_ARTICLE_MARKDOWN:
         return None
 
