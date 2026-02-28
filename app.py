@@ -26,82 +26,135 @@ from analyzer import (
 st.set_page_config(page_title="Content Similarity Audit", layout="wide")
 
 ACCENT = "#d43584"  # marczak.me
+BG = "#ffffff"
+BORDER = "rgba(0,0,0,0.08)"
 
 # -------------------------
-# CSS
+# CSS (marczak-like + compact + sticky CTA)
 # -------------------------
 st.markdown(
     f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 html, body, [class*="css"] {{
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 }}
 
-h1 {{ font-size: 1.45rem !important; margin: 0.35rem 0 0.35rem 0 !important; }}
-h2 {{ font-size: 1.15rem !important; margin: 0.65rem 0 0.35rem 0 !important; }}
-h3 {{ font-size: 1.00rem !important; margin: 0.6rem 0 0.3rem 0 !important; }}
+h1 {{ font-size: 1.30rem !important; margin: 0.25rem 0 0.35rem 0 !important; }}
+h2 {{ font-size: 1.05rem !important; margin: 0.55rem 0 0.25rem 0 !important; }}
+h3 {{ font-size: 0.98rem !important; margin: 0.5rem 0 0.2rem 0 !important; }}
 
 small {{
-  color: rgba(0,0,0,0.60);
-  font-size: 0.86rem;
+  color: rgba(0,0,0,0.58);
+  font-size: 0.84rem;
 }}
 
-/* Fix title clipping: add a bit of top space */
-[data-testid="stMainBlockContainer"] {{
-  padding-top: 0.95rem;   /* ~15px */
-  padding-bottom: 0.75rem;
-  max-height: 900px;
-  overflow-y: auto;
-}}
+/* Keep everything inside 900px viewport feel */
 [data-testid="stAppViewContainer"] {{
   max-height: 900px;
 }}
+[data-testid="stMainBlockContainer"] {{
+  padding-top: 1.0rem;   /* prevents title clipping */
+  padding-bottom: 4.4rem; /* room for sticky CTA bar */
+  max-height: 900px;
+  overflow-y: auto;
+}}
 
-/* Primary button */
+/* Cards (containers) */
+div[data-testid="stVerticalBlock"] div[data-testid="stContainer"] {{
+  border-radius: 16px !important;
+  border: 1px solid {BORDER} !important;
+  background: rgba(255,255,255,0.92) !important;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.035) !important;
+  padding: 12px 12px 10px 12px !important;
+}}
+
+/* Make widgets a bit tighter */
+label, .stMarkdown p {{
+  font-size: 0.90rem !important;
+}}
+div[data-baseweb="input"] input {{
+  padding-top: 10px !important;
+  padding-bottom: 10px !important;
+}}
+div[data-baseweb="select"] > div {{
+  padding-top: 8px !important;
+  padding-bottom: 8px !important;
+}}
+
+/* Primary button (CTA) */
 div.stButton > button {{
   background: {ACCENT} !important;
   color: #ffffff !important;
   border: 1px solid {ACCENT} !important;
   border-radius: 12px !important;
-  padding: 0.55rem 0.9rem !important;
-  font-weight: 700 !important;
+  padding: 0.62rem 1.00rem !important;
+  font-weight: 800 !important;
 }}
 div.stButton > button:hover {{
   filter: brightness(0.95);
 }}
 
-/* Card containers */
-div[data-testid="stVerticalBlock"] div[data-testid="stContainer"] {{
-  border-radius: 16px !important;
-  border: 1px solid rgba(0,0,0,0.08) !important;
-  background: rgba(255,255,255,0.88) !important;
-  box-shadow: 0 4px 18px rgba(0,0,0,0.04) !important;
-  padding: 12px 12px 10px 12px !important;
+/* Sliders: avoid "error red" vibe (best-effort, Streamlit varies by version) */
+div[data-testid="stSlider"] [data-baseweb="slider"] div[role="slider"] {{
+  border-color: rgba(0,0,0,0.25) !important;
+  background-color: rgba(0,0,0,0.25) !important;
+}}
+div[data-testid="stSlider"] [data-baseweb="slider"] div[aria-valuetext] {{
+  color: rgba(0,0,0,0.60) !important;
+}}
+div[data-testid="stSlider"] [data-baseweb="slider"] div {{
+  color: rgba(0,0,0,0.60) !important;
 }}
 
-/* Smaller labels and tighter spacing */
-label, .stMarkdown p {{
-  font-size: 0.92rem !important;
+/* Progress bar color (best-effort) */
+div[data-testid="stProgress"] > div > div > div {{
+  background-color: {ACCENT} !important;
 }}
 
 /* Dataframes */
 div[data-testid="stDataFrame"] {{
   border-radius: 14px;
   overflow: hidden;
-  border: 1px solid rgba(0,0,0,0.08);
+  border: 1px solid {BORDER};
 }}
 
 /* Tabs */
 .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
 .stTabs [data-baseweb="tab"] {{ border-radius: 10px; }}
 
-/* Utility row titles */
+/* Step titles */
 .step-title {{
   font-weight: 800;
-  font-size: 0.95rem;
-  margin: 0 0 0.4rem 0;
+  font-size: 0.94rem;
+  margin: 0 0 0.35rem 0;
+}}
+
+/* Sticky CTA bar at bottom */
+#sticky-cta {{
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9999;
+  padding: 10px 18px;
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid {BORDER};
+}}
+#sticky-cta-inner {{
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}}
+#sticky-cta-hint {{
+  color: rgba(0,0,0,0.55);
+  font-size: 0.86rem;
+  line-height: 1.2;
 }}
 </style>
 """,
@@ -288,11 +341,11 @@ st.markdown("## Content Similarity Audit")
 st.markdown("<small>Scrape → Markdown → Similarity → Cannibalization</small>", unsafe_allow_html=True)
 st.markdown("")
 
+# -------------------------
+# Top layout (the "best" one): left settings + right mini results
+# -------------------------
 left, right = st.columns([1.05, 1.0], gap="large")
 
-# -------------------------
-# LEFT: compact rows (title on left, widget on right)
-# -------------------------
 with left:
     with st.container(border=True):
         r1a, r1b = st.columns([0.34, 0.66], vertical_alignment="center")
@@ -307,23 +360,20 @@ with left:
             ).strip()
 
     with st.container(border=True):
-        r2a, r2b = st.columns([0.34, 0.66], vertical_alignment="center")
-        with r2a:
-            st.markdown('<div class="step-title">Źródło URL-i</div>', unsafe_allow_html=True)
-        with r2b:
-            mode = st.radio(
-                label="",
-                options=[
-                    "auto (sitemap, rss)",
-                    "url sitemapy",
-                    "csv z sitemapą",
-                    "wklej URL-e",
-                    "wgraj CSV z URL-ami",
-                ],
-                index=0,
-                horizontal=True,
-                label_visibility="collapsed",
-            )
+        st.markdown('<div class="step-title">Źródło URL-i</div>', unsafe_allow_html=True)
+        mode = st.radio(
+            label="",
+            options=[
+                "auto (sitemap, rss)",
+                "url sitemapy",
+                "csv z sitemapą",
+                "wklej URL-e",
+                "wgraj CSV z URL-ami",
+            ],
+            index=0,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
 
         sitemap_url = ""
         sitemap_upload = None
@@ -339,24 +389,22 @@ with left:
 
         if mode == "csv z sitemapą":
             sitemap_upload = st.file_uploader(
-                label="",
+                "Wgraj sitemapę jako XML lub CSV",
                 type=["xml", "csv"],
-                label_visibility="collapsed",
             )
 
         if mode == "wklej URL-e":
             manual_urls_text = st.text_area(
                 label="",
-                height=110,
+                height=100,
                 placeholder="Wklej URL-e (1 linia = 1 URL)",
                 label_visibility="collapsed",
             )
 
         if mode == "wgraj CSV z URL-ami":
             uploaded_urls_csv = st.file_uploader(
-                label="",
+                "Wgraj CSV z URL-ami (kolumna URL lub pierwsza kolumna)",
                 type=["csv"],
-                label_visibility="collapsed",
             )
 
     with st.container(border=True):
@@ -385,13 +433,9 @@ with left:
         min_words = colb2.number_input("Min słów", 10, 500, 40, 10)
         max_pairs = colb3.number_input("Limit par", 100, 20000, 2000, 100)
 
-    # CTA (kept visible, below steps)
-    run_btn = st.button("Rozpocznij analizę", type="primary")
+    # Optional: keep the in-page CTA too (you can delete this block if you want ONLY sticky CTA)
+    inpage_run = st.button("Rozpocznij analizę", type="primary")
 
-
-# -------------------------
-# RIGHT: Results
-# -------------------------
 with right:
     with st.container(border=True):
         st.markdown('<div class="step-title">Wyniki</div>', unsafe_allow_html=True)
@@ -407,82 +451,121 @@ with right:
 
         if a is None:
             st.info("Uruchom analizę, żeby zobaczyć wyniki.")
-        else:
-            tabs = st.tabs(["GSC workflow", "Pary", "Grupy", "Artykuły", "Eksport", "Diagnostyka"])
 
-            with tabs[0]:
-                st.markdown("### GSC workflow")
-                if g is None or g.empty:
-                    st.info("Brak grup. Obniż próg (np. 20–30%) lub użyj presetu kanibalizacja.")
-                else:
-                    group_options = g["group_id"].astype(int).tolist()
-                    selected_gid = st.selectbox("Wybierz grupę", options=group_options, index=0)
+# -------------------------
+# Sticky CTA bar
+# -------------------------
+sticky_placeholder = st.empty()
+with sticky_placeholder:
+    st.markdown(
+        f"""
+<div id="sticky-cta">
+  <div id="sticky-cta-inner">
+    <div id="sticky-cta-hint">
+      Ustaw parametry po lewej i uruchom analizę. Wyniki pojawią się poniżej.
+    </div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
-                    row = g[g["group_id"] == selected_gid].iloc[0]
-                    urls = _urls_from_groups_row(row["urls"])
-                    st.write(f"Rozmiar grupy: **{int(row['size'])}**")
+# Create sticky CTA button in a separate container (Streamlit button must be in Python, not HTML)
+cta_cols = st.columns([0.75, 0.25])
+with cta_cols[1]:
+    sticky_run = st.button("Rozpocznij analizę", type="primary")
 
-                    primary_url = st.selectbox("Primary URL", options=urls, index=0 if urls else None)
+# One source of truth for "run"
+run_btn = bool(inpage_run) or bool(sticky_run)
 
-                    # compact table
-                    titles_map, h1_map = {}, {}
-                    if a is not None and not a.empty:
-                        a_map = a.set_index("URL")
-                        for u in urls:
-                            if u in a_map.index:
-                                titles_map[u] = str(a_map.loc[u, "title"])
-                                h1_map[u] = str(a_map.loc[u, "H1"])
-                            else:
-                                titles_map[u] = ""
-                                h1_map[u] = ""
+# -------------------------
+# RESULTS (full section)
+# -------------------------
+st.markdown("")
+with st.container(border=True):
+    st.markdown('<div class="step-title">Wyniki (szczegóły)</div>', unsafe_allow_html=True)
 
-                    table_rows = []
-                    for u in urls:
-                        table_rows.append({"primary": "✅" if u == primary_url else "", "url": u, "title": titles_map.get(u, ""), "h1": h1_map.get(u, "")})
+    a = st.session_state.articles_df
+    p = st.session_state.pairs_df
+    g = st.session_state.groups_df
 
-                    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, height=220)
+    if a is None:
+        st.info("Uruchom analizę, żeby zobaczyć wyniki.")
+    else:
+        tabs = st.tabs(["GSC workflow", "Pary", "Grupy", "Artykuły", "Eksport", "Diagnostyka"])
 
-                    export_df = _make_group_export_df(selected_gid, urls, primary_url=primary_url)
-                    _download_csv_button(export_df, "Pobierz CSV tej grupy", f"gsc_group_{selected_gid}.csv")
+        with tabs[0]:
+            st.markdown("### GSC workflow")
+            if g is None or g.empty:
+                st.info("Brak grup. Obniż próg (np. 20–30%) lub użyj presetu kanibalizacja.")
+            else:
+                group_options = g["group_id"].astype(int).tolist()
+                selected_gid = st.selectbox("Wybierz grupę", options=group_options, index=0)
 
-                    with st.expander("Co sprawdzić i jak interpretować wyniki?", expanded=False):
-                        st.markdown(_gsc_checklist_text(primary_url, urls))
+                row = g[g["group_id"] == selected_gid].iloc[0]
+                urls = _urls_from_groups_row(row["urls"])
+                st.write(f"Rozmiar grupy: **{int(row['size'])}**")
 
-            with tabs[1]:
-                st.markdown(f"### Pary powyżej progu: {threshold_pct}% ({method})")
-                if p is None or p.empty:
-                    st.info("Brak par powyżej progu. Zmniejsz próg lub zmień preset.")
-                else:
-                    st.dataframe(p, use_container_width=True, height=320)
+                primary_url = st.selectbox("Primary URL", options=urls, index=0 if urls else None)
 
-            with tabs[2]:
-                st.markdown(f"### Grupy powyżej progu: {threshold_pct}% ({method})")
-                if g is None or g.empty:
-                    st.info("Brak grup.")
-                else:
-                    st.dataframe(g, use_container_width=True, height=320)
-
-            with tabs[3]:
-                st.markdown("### Artykuły (Markdown)")
-                st.dataframe(a, use_container_width=True, height=320)
-
-            with tabs[4]:
-                st.markdown("### Eksport")
+                titles_map, h1_map = {}, {}
                 if a is not None and not a.empty:
-                    _download_csv_button(a, "articles.csv", "articles.csv")
-                if p is not None and not p.empty:
-                    _download_csv_button(p, "similarity_pairs.csv", "similarity_pairs.csv")
-                if g is not None and not g.empty:
-                    _download_csv_button(g, "similarity_groups.csv", "similarity_groups.csv")
+                    a_map = a.set_index("URL")
+                    for u in urls:
+                        if u in a_map.index:
+                            titles_map[u] = str(a_map.loc[u, "title"])
+                            h1_map[u] = str(a_map.loc[u, "H1"])
+                        else:
+                            titles_map[u] = ""
+                            h1_map[u] = ""
 
-            with tabs[5]:
-                st.markdown("### Diagnostyka")
-                if st.session_state.sim_matrix is not None:
-                    sim = st.session_state.sim_matrix
-                    _plot_similarity_hist(sim, title=f"Similarity distribution ({method})")
-                log = (st.session_state.run_log or [])[-200:]
-                st.code("\n".join(log) if log else "Brak logu.")
+                table_rows = []
+                for u in urls:
+                    table_rows.append(
+                        {"primary": "✅" if u == primary_url else "", "url": u, "title": titles_map.get(u, ""), "h1": h1_map.get(u, "")}
+                    )
+                st.dataframe(pd.DataFrame(table_rows), use_container_width=True, height=240)
 
+                export_df = _make_group_export_df(selected_gid, urls, primary_url=primary_url)
+                _download_csv_button(export_df, "Pobierz CSV tej grupy", f"gsc_group_{selected_gid}.csv")
+
+                with st.expander("Co sprawdzić i jak interpretować wyniki?", expanded=False):
+                    st.markdown(_gsc_checklist_text(primary_url, urls))
+
+        with tabs[1]:
+            st.markdown(f"### Pary powyżej progu: {threshold_pct}% ({method})")
+            if p is None or p.empty:
+                st.info("Brak par powyżej progu. Zmniejsz próg lub zmień preset.")
+            else:
+                st.dataframe(p, use_container_width=True, height=360)
+
+        with tabs[2]:
+            st.markdown(f"### Grupy powyżej progu: {threshold_pct}% ({method})")
+            if g is None or g.empty:
+                st.info("Brak grup.")
+            else:
+                st.dataframe(g, use_container_width=True, height=360)
+
+        with tabs[3]:
+            st.markdown("### Artykuły (Markdown)")
+            st.dataframe(a, use_container_width=True, height=360)
+
+        with tabs[4]:
+            st.markdown("### Eksport")
+            if a is not None and not a.empty:
+                _download_csv_button(a, "articles.csv", "articles.csv")
+            if p is not None and not p.empty:
+                _download_csv_button(p, "similarity_pairs.csv", "similarity_pairs.csv")
+            if g is not None and not g.empty:
+                _download_csv_button(g, "similarity_groups.csv", "similarity_groups.csv")
+
+        with tabs[5]:
+            st.markdown("### Diagnostyka")
+            if st.session_state.sim_matrix is not None:
+                sim = st.session_state.sim_matrix
+                _plot_similarity_hist(sim, title=f"Similarity distribution ({method})")
+            log = (st.session_state.run_log or [])[-200:]
+            st.code("\n".join(log) if log else "Brak logu.")
 
 # -------------------------
 # Run pipeline
