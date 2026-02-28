@@ -18,7 +18,6 @@ from analyzer import (
     build_similarity_matrices,
     similarity_pairs_report,
     similarity_groups_report,
-    interpretation_help_text,  # zostaje, ale nie pokazujemy w nagłówkach „dla nietechnicznych”
 )
 
 # -------------------------
@@ -26,60 +25,42 @@ from analyzer import (
 # -------------------------
 st.set_page_config(page_title="Content Similarity Audit", layout="wide")
 
-# -------------------------
-# UI Styles (marczak.me vibe)
-# -------------------------
 ACCENT = "#d43584"  # marczak.me
+
+# -------------------------
+# CSS (marczak.me vibe + 900px viewport)
+# -------------------------
 st.markdown(
     f"""
 <style>
-/* Layout height target ~900px */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body, [class*="css"] {{
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}}
+
+h1 {{ font-size: 1.45rem !important; margin: 0.3rem 0 0.35rem 0 !important; }}
+h2 {{ font-size: 1.15rem !important; margin: 0.7rem 0 0.35rem 0 !important; }}
+h3 {{ font-size: 1.00rem !important; margin: 0.65rem 0 0.3rem 0 !important; }}
+h4 {{ font-size: 0.95rem !important; }}
+
+small, .mini-note {{
+  color: rgba(0,0,0,0.60);
+  font-size: 0.86rem;
+}}
+
+/* Keep app in ~900px height, but DO NOT clip top */
 [data-testid="stAppViewContainer"] {{
-  height: 900px;
-  overflow: hidden;
+  max-height: 900px;
 }}
 [data-testid="stMainBlockContainer"] {{
-  padding-top: 0.75rem;
+  padding-top: 0.65rem;
   padding-bottom: 0.75rem;
   max-height: 900px;
   overflow-y: auto;
 }}
 
-/* Global font */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-html, body, [class*="css"] {{
-  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-}}
-
-/* Reduce header sizes slightly (more space) */
-h1 {{ font-size: 1.55rem !important; margin-bottom: 0.25rem !important; }}
-h2 {{ font-size: 1.25rem !important; margin-top: 0.6rem !important; }}
-h3 {{ font-size: 1.05rem !important; margin-top: 0.55rem !important; }}
-h4 {{ font-size: 0.95rem !important; }}
-
-/* Cards */
-.card {{
-  border: 1px solid rgba(0,0,0,0.08);
-  border-radius: 16px;
-  padding: 14px 14px 12px 14px;
-  background: rgba(255,255,255,0.85);
-  box-shadow: 0 4px 18px rgba(0,0,0,0.04);
-}}
-.card + .card {{ margin-top: 12px; }}
-
-.card-title {{
-  font-weight: 700;
-  font-size: 0.95rem;
-  margin-bottom: 0.55rem;
-}}
-
-.mini-note {{
-  color: rgba(0,0,0,0.60);
-  font-size: 0.86rem;
-  margin-top: 0.25rem;
-}}
-
-/* Button styling */
+/* Primary button */
 div.stButton > button {{
   background: {ACCENT} !important;
   color: #ffffff !important;
@@ -91,15 +72,21 @@ div.stButton > button {{
 div.stButton > button:hover {{
   filter: brightness(0.95);
 }}
-/* Secondary buttons keep default unless we tag them; streamlit doesn't support per-button CSS easily */
 
-/* Subtle accent for selected radio/check */
-div[role="radiogroup"] label div[aria-checked="true"] {{
-  border-color: {ACCENT} !important;
+/* Make bordered containers look like cards */
+div[data-testid="stVerticalBlock"] div[data-testid="stContainer"] {{
+  border-radius: 16px !important;
+  border: 1px solid rgba(0,0,0,0.08) !important;
+  background: rgba(255,255,255,0.88) !important;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.04) !important;
+  padding: 12px 12px 10px 12px !important;
 }}
 
-/* Dataframe container: a bit tighter */
-[data-testid="stDataFrame"] {{
+/* Tighten some widget spacing */
+div[data-testid="stRadio"] > label, div[data-testid="stCheckbox"] > label {{
+  font-size: 0.92rem;
+}}
+div[data-testid="stDataFrame"] {{
   border-radius: 14px;
   overflow: hidden;
   border: 1px solid rgba(0,0,0,0.08);
@@ -118,7 +105,7 @@ div[role="radiogroup"] label div[aria-checked="true"] {{
 )
 
 # -------------------------
-# Helpers: encoding + mojibake fix
+# Helpers
 # -------------------------
 def _try_read_csv_with_encodings(uploaded_file) -> pd.DataFrame:
     raw = uploaded_file.getvalue()
@@ -132,38 +119,16 @@ def _try_read_csv_with_encodings(uploaded_file) -> pd.DataFrame:
     raise last_err
 
 
-def _fix_mojibake(s: str) -> str:
-    if not isinstance(s, str) or not s:
-        return s
-    bad_markers = ["Ã", "Å", "Ä", "â", "Ê", "Ë", "Ð", "Þ"]
-    if not any(m in s for m in bad_markers):
-        return s
-    try:
-        repaired = s.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
-        if repaired and repaired != s:
-            return repaired
-        return s
-    except Exception:
-        return s
-
-
-def _fix_dataframe_text(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    out = df.copy()
-    for c in cols:
-        if c in out.columns:
-            out[c] = out[c].astype(str).apply(_fix_mojibake)
-    return out
+def _download_csv_button(df: pd.DataFrame, label: str, filename: str):
+    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(label=label, data=csv_bytes, file_name=filename, mime="text/csv")
 
 
 def _extract_urls_from_text(text: str) -> list[str]:
     if not text:
         return []
     lines = [ln.strip() for ln in text.splitlines()]
-    urls = []
-    for ln in lines:
-        if ln.startswith("http://") or ln.startswith("https://"):
-            urls.append(ln)
-    return urls
+    return [ln for ln in lines if ln.startswith(("http://", "https://"))]
 
 
 def _read_urls_from_uploaded_csv(file) -> list[str]:
@@ -174,13 +139,59 @@ def _read_urls_from_uploaded_csv(file) -> list[str]:
         urls = df["URL"].astype(str).tolist()
     else:
         urls = df.iloc[:, 0].astype(str).tolist()
-    urls = [u.strip() for u in urls if isinstance(u, str) and u.strip()]
-    return urls
+    urls = [u.strip() for u in urls if u and str(u).startswith(("http://", "https://"))]
+    # dedupe
+    seen = set()
+    out = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
-def _download_csv_button(df: pd.DataFrame, label: str, filename: str):
-    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(label=label, data=csv_bytes, file_name=filename, mime="text/csv")
+def _parse_sitemap_xml(xml_text: str) -> list[str]:
+    if not xml_text:
+        return []
+    soup = BeautifulSoup(xml_text, "xml")
+    locs = [loc.get_text(strip=True) for loc in soup.find_all("loc")]
+    urls = [u.strip() for u in locs if u and u.strip().startswith(("http://", "https://"))]
+    seen = set()
+    out = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _read_sitemap_from_upload(uploaded_file) -> list[str]:
+    name = (uploaded_file.name or "").lower()
+    raw = uploaded_file.getvalue()
+
+    if name.endswith(".xml"):
+        try:
+            txt = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            txt = raw.decode("latin1", errors="ignore")
+        return _parse_sitemap_xml(txt)
+
+    # CSV fallback
+    df = _try_read_csv_with_encodings(uploaded_file)
+    if df is None or df.empty:
+        return []
+    if "URL" in df.columns:
+        urls = df["URL"].astype(str).tolist()
+    else:
+        urls = df.iloc[:, 0].astype(str).tolist()
+    urls = [u.strip() for u in urls if u and str(u).startswith(("http://", "https://"))]
+    seen = set()
+    out = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
 def _progress_callback_factory(status_el, bar_el, log_list: list[str]):
@@ -225,70 +236,6 @@ def _preset_settings(preset_name: str):
     return presets.get(preset_name, ("hybrid", 30, 25))
 
 
-def _parse_sitemap_xml(xml_text: str) -> list[str]:
-    """
-    Obsługuje zarówno sitemapindex jak i urlset.
-    """
-    if not xml_text:
-        return []
-    soup = BeautifulSoup(xml_text, "xml")
-    locs = [loc.get_text(strip=True) for loc in soup.find_all("loc")]
-    urls = [u.strip() for u in locs if u and u.strip().startswith(("http://", "https://"))]
-    # dedupe
-    seen = set()
-    out = []
-    for u in urls:
-        if u not in seen:
-            seen.add(u)
-            out.append(u)
-    return out
-
-
-def _read_sitemap_from_upload(uploaded_file) -> list[str]:
-    """
-    Akceptuje:
-    - XML sitemap (urlset/sitemapindex)
-    - CSV z URL-ami (kolumna URL lub pierwsza)
-    """
-    name = (uploaded_file.name or "").lower()
-    raw = uploaded_file.getvalue()
-
-    if name.endswith(".xml"):
-        try:
-            txt = raw.decode("utf-8", errors="ignore")
-        except Exception:
-            txt = raw.decode("latin1", errors="ignore")
-        return _parse_sitemap_xml(txt)
-
-    # CSV fallback
-    df = None
-    try:
-        df = pd.read_csv(io.BytesIO(raw), encoding="utf-8-sig")
-    except Exception:
-        try:
-            df = pd.read_csv(io.BytesIO(raw), encoding="utf-8")
-        except Exception:
-            try:
-                df = pd.read_csv(io.BytesIO(raw), encoding="cp1250")
-            except Exception:
-                df = pd.read_csv(io.BytesIO(raw), encoding="latin1")
-    if df is None or df.empty:
-        return []
-    if "URL" in df.columns:
-        urls = df["URL"].astype(str).tolist()
-    else:
-        urls = df.iloc[:, 0].astype(str).tolist()
-    urls = [u.strip() for u in urls if u and str(u).startswith(("http://", "https://"))]
-    # dedupe
-    seen = set()
-    out = []
-    for u in urls:
-        if u not in seen:
-            seen.add(u)
-            out.append(u)
-    return out
-
-
 def _urls_from_groups_row(urls_cell: str) -> list[str]:
     if not isinstance(urls_cell, str) or not urls_cell.strip():
         return []
@@ -306,21 +253,21 @@ def _make_group_export_df(group_id: int, urls: list[str], primary_url: str = "")
     return pd.DataFrame(rows, columns=["group_id", "url", "is_primary"])
 
 
-def _gsc_checklist_text(primary_url: str, other_urls: list[str]) -> str:
-    other_count = len([u for u in other_urls if u != primary_url])
+def _gsc_checklist_text(primary_url: str, urls: list[str]) -> str:
+    other_count = len([u for u in urls if u != primary_url])
     return (
         "### Cel\n"
         "Sprawdzamy, czy strony w grupie konkurują o te same zapytania, przez co Google miesza URL-e w wynikach.\n\n"
         "### Krok 1\n"
         "- GSC → Skuteczność → Wyniki wyszukiwania\n"
-        "- Zakres dat: 3 miesiące, potem 16 miesięcy\n"
+        "- Zakres: 3 miesiące, potem 16 miesięcy\n"
         "- Metryki: Kliknięcia, Wyświetlenia, CTR, Śr. pozycja\n\n"
         "### Krok 2\n"
         "- Filtr Strona = Primary URL → zobacz Zapytania\n"
         "- Porównaj z pozostałymi URL-ami\n\n"
         "Sygnały kanibalizacji:\n"
         "- te same zapytania na kilku URL-ach\n"
-        "- wykresy kliknięć i wyświetleń przechodzą między URL-ami\n"
+        "- wykresy kliknięć/wyświetleń przechodzą między URL-ami\n"
         "- CTR spada, bo Google testuje różne strony\n\n"
         "### Krok 3\n"
         "- Weź top zapytania z Primary URL\n"
@@ -356,124 +303,95 @@ if "run_log" not in st.session_state:
 # -------------------------
 # Header (compact)
 # -------------------------
-st.markdown(
-    f"""
-<div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:14px;">
-  <div>
-    <div style="font-size:1.05rem; font-weight:800;">Content Similarity Audit</div>
-    <div class="mini-note">Scrape → Markdown → Similarity → Cannibalization</div>
-  </div>
-  <div style="font-size:0.9rem; font-weight:700; color:{ACCENT};">accent: {ACCENT}</div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
+st.markdown("## Content Similarity Audit")
+st.markdown("<small>Scrape → Markdown → Similarity → Cannibalization</small>", unsafe_allow_html=True)
 st.markdown("")
 
 # -------------------------
-# Layout: left (inputs) / right (results)
+# Layout
 # -------------------------
 left, right = st.columns([1.05, 1.0], gap="large")
 
 # -------------------------
-# LEFT: Inputs
+# LEFT
 # -------------------------
 with left:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-title">1. Podaj adres strony</div>', unsafe_allow_html=True)
-    base_url = st.text_input("Adres strony", value="https://marczak.me").strip()
-    st.markdown("</div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("**1. Podaj adres strony**")
+        base_url = st.text_input("Adres strony", value="https://marczak.me").strip()
 
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-title">Źródło URL-i</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("**Źródło URL-i**")
 
-    mode = st.radio(
-        "Jak chcesz dostarczyć URL-e?",
-        options=[
-            "auto (sitemap, rss)",
-            "url sitemapy",
-            "csv z sitemapą",
-            "wklej URL-e",
-            "wgraj CSV z URL-ami",
-        ],
-        index=0,
-        horizontal=True,  # obok siebie
-    )
-
-    sitemap_url = ""
-    sitemap_upload = None
-    manual_urls_text = ""
-    uploaded_urls_csv = None
-
-    if mode == "url sitemapy":
-        sitemap_url = st.text_input(
-            "URL sitemapy (XML)",
-            placeholder="https://marczak.me/sitemap.xml",
-        ).strip()
-
-    if mode == "csv z sitemapą":
-        sitemap_upload = st.file_uploader(
-            "Wgraj sitemapę jako XML lub CSV",
-            type=["xml", "csv"],
+        mode = st.radio(
+            "Jak chcesz dostarczyć URL-e?",
+            options=[
+                "auto (sitemap, rss)",
+                "url sitemapy",
+                "csv z sitemapą",
+                "wklej URL-e",
+                "wgraj CSV z URL-ami",
+            ],
+            index=0,
+            horizontal=True,
         )
 
-    if mode == "wklej URL-e":
-        manual_urls_text = st.text_area(
-            "URL-e (1 linia = 1 URL)",
-            height=120,
-            placeholder="https://marczak.me/jakis-artykul/\nhttps://marczak.me/inny-artykul/",
+        sitemap_url = ""
+        sitemap_upload = None
+        manual_urls_text = ""
+        uploaded_urls_csv = None
+
+        if mode == "url sitemapy":
+            sitemap_url = st.text_input(
+                "URL sitemapy (XML)",
+                placeholder="https://marczak.me/sitemap.xml",
+            ).strip()
+
+        if mode == "csv z sitemapą":
+            sitemap_upload = st.file_uploader(
+                "Wgraj sitemapę jako XML lub CSV",
+                type=["xml", "csv"],
+            )
+
+        if mode == "wklej URL-e":
+            manual_urls_text = st.text_area(
+                "URL-e (1 linia = 1 URL)",
+                height=120,
+                placeholder="https://marczak.me/jakis-artykul/\nhttps://marczak.me/inny-artykul/",
+            )
+
+        if mode == "wgraj CSV z URL-ami":
+            uploaded_urls_csv = st.file_uploader(
+                "Wgraj CSV z URL-ami (kolumna URL lub pierwsza kolumna)",
+                type=["csv"],
+            )
+
+    with st.container(border=True):
+        st.markdown("**2. Ustawienia scrapowania**")
+        c1, c2, c3 = st.columns(3)
+        max_pages = c1.number_input("Limit artykułów", 1, 2000, 200, 10)
+        timeout = c2.number_input("Timeout (s)", 5, 120, 20, 5)
+        delay = c3.slider("Delay (s)", 0.0, 3.0, 0.6, 0.1)
+        same_subdomain_only = st.checkbox("Tylko ta sama subdomena", value=True)
+
+    with st.container(border=True):
+        st.markdown("**3. Analiza podobieństwa**")
+        preset = st.selectbox("Preset", options=["kanibalizacja", "overlap tematu", "duplikacja", "ostrożnie"], index=0)
+        preset_method, preset_thr, preset_boiler = _preset_settings(preset)
+
+        colx, coly = st.columns([1, 1])
+        method = colx.selectbox(
+            "Metoda",
+            ["hybrid", "word_tfidf", "char_tfidf"],
+            index=["hybrid", "word_tfidf", "char_tfidf"].index(preset_method),
         )
+        threshold_pct = coly.slider("Próg (%)", 0, 100, int(preset_thr), 1)
 
-    if mode == "wgraj CSV z URL-ami":
-        uploaded_urls_csv = st.file_uploader(
-            "Wgraj CSV z URL-ami (kolumna URL lub pierwsza kolumna)",
-            type=["csv"],
-        )
+        colb1, colb2, colb3 = st.columns(3)
+        boiler_df_pct = colb1.slider("Boilerplate (%)", 5, 60, int(preset_boiler), 5)
+        min_words = colb2.number_input("Min słów", 10, 500, 40, 10)
+        max_pairs = colb3.number_input("Limit par", 100, 20000, 2000, 100)
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-title">2. Ustawienia scrapowania</div>', unsafe_allow_html=True)
-
-    c1, c2, c3 = st.columns(3)
-    max_pages = c1.number_input("Limit artykułów", 1, 2000, 200, 10)
-    timeout = c2.number_input("Timeout (s)", 5, 120, 20, 5)
-    delay = c3.slider("Delay (s)", 0.0, 3.0, 0.6, 0.1)
-
-    same_subdomain_only = st.checkbox(
-        "Tylko ta sama subdomena",
-        value=True,
-        help="Jeśli odznaczysz, scraper może brać też subdomeny w ramach tej samej domeny głównej.",
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-title">3. Analiza podobieństwa</div>', unsafe_allow_html=True)
-
-    preset = st.selectbox(
-        "Preset",
-        options=["kanibalizacja", "overlap tematu", "duplikacja", "ostrożnie"],
-        index=0,
-    )
-    preset_method, preset_thr, preset_boiler = _preset_settings(preset)
-
-    colx, coly = st.columns([1, 1])
-    method = colx.selectbox(
-        "Metoda",
-        ["hybrid", "word_tfidf", "char_tfidf"],
-        index=["hybrid", "word_tfidf", "char_tfidf"].index(preset_method),
-    )
-    threshold_pct = coly.slider("Próg (%)", 0, 100, int(preset_thr), 1)
-
-    colb1, colb2, colb3 = st.columns(3)
-    boiler_df_pct = colb1.slider("Boilerplate (%)", 5, 60, int(preset_boiler), 5)
-    min_words = colb2.number_input("Min słów", 10, 500, 40, 10)
-    max_pairs = colb3.number_input("Limit par", 100, 20000, 2000, 100)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # CTA
     run_btn = st.button("Rozpocznij analizę", type="primary")
 
 
@@ -481,146 +399,113 @@ with left:
 # RIGHT: Results
 # -------------------------
 with right:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="card-title">Wyniki</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("**Wyniki**")
 
-    a = st.session_state.articles_df
-    p = st.session_state.pairs_df
-    g = st.session_state.groups_df
+        a = st.session_state.articles_df
+        p = st.session_state.pairs_df
+        g = st.session_state.groups_df
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Artykuły", "—" if a is None else len(a))
-    m2.metric("Pary", "—" if p is None else len(p))
-    m3.metric("Grupy", "—" if g is None else len(g))
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Artykuły", "—" if a is None else len(a))
+        m2.metric("Pary", "—" if p is None else len(p))
+        m3.metric("Grupy", "—" if g is None else len(g))
 
-    if a is None:
-        st.info("Uruchom analizę, żeby zobaczyć wyniki.")
-        st.markdown("</div>", unsafe_allow_html=True)
-    else:
-        tabs = st.tabs(["GSC workflow", "Pary", "Grupy", "Artykuły", "Eksport", "Diagnostyka"])
+        if a is None:
+            st.info("Uruchom analizę, żeby zobaczyć wyniki.")
+        else:
+            tabs = st.tabs(["GSC workflow", "Pary", "Grupy", "Artykuły", "Eksport", "Diagnostyka"])
 
-        # -------- GSC workflow
-        with tabs[0]:
-            st.markdown("### GSC workflow")
-            if g is None or g.empty:
-                st.info("Brak grup. Obniż próg (np. 20–30%) lub użyj presetu kanibalizacja.")
-            else:
-                group_options = g["group_id"].astype(int).tolist()
-                selected_gid = st.selectbox("Wybierz grupę", options=group_options, index=0)
+            with tabs[0]:
+                st.markdown("### GSC workflow")
+                if g is None or g.empty:
+                    st.info("Brak grup. Obniż próg (np. 20–30%) lub użyj presetu kanibalizacja.")
+                else:
+                    group_options = g["group_id"].astype(int).tolist()
+                    selected_gid = st.selectbox("Wybierz grupę", options=group_options, index=0)
 
-                row = g[g["group_id"] == selected_gid].iloc[0]
-                urls = _urls_from_groups_row(row["urls"])
-                size = int(row["size"])
-                st.write(f"Rozmiar grupy: **{size}**")
+                    row = g[g["group_id"] == selected_gid].iloc[0]
+                    urls = _urls_from_groups_row(row["urls"])
+                    st.write(f"Rozmiar grupy: **{int(row['size'])}**")
 
-                titles_map = {}
-                h1_map = {}
-                if a is not None and not a.empty:
-                    a_map = a.set_index("URL")
+                    # primary url
+                    primary_url = st.selectbox("Primary URL", options=urls, index=0 if urls else None)
+
+                    # compact table
+                    titles_map, h1_map = {}, {}
+                    if a is not None and not a.empty:
+                        a_map = a.set_index("URL")
+                        for u in urls:
+                            if u in a_map.index:
+                                titles_map[u] = str(a_map.loc[u, "title"])
+                                h1_map[u] = str(a_map.loc[u, "H1"])
+                            else:
+                                titles_map[u] = ""
+                                h1_map[u] = ""
+
+                    table_rows = []
                     for u in urls:
-                        if u in a_map.index:
-                            titles_map[u] = str(a_map.loc[u, "title"])
-                            h1_map[u] = str(a_map.loc[u, "H1"])
-                        else:
-                            titles_map[u] = ""
-                            h1_map[u] = ""
+                        table_rows.append(
+                            {"primary": "✅" if u == primary_url else "", "url": u, "title": titles_map.get(u, ""), "h1": h1_map.get(u, "")}
+                        )
+                    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, height=220)
 
-                primary_url = st.selectbox("Primary URL", options=urls, index=0 if urls else None)
+                    export_df = _make_group_export_df(selected_gid, urls, primary_url=primary_url)
+                    _download_csv_button(export_df, "Pobierz CSV tej grupy", f"gsc_group_{selected_gid}.csv")
 
-                table_rows = []
-                for u in urls:
-                    table_rows.append({
-                        "primary": "✅" if u == primary_url else "",
-                        "url": u,
-                        "title": titles_map.get(u, ""),
-                        "h1": h1_map.get(u, ""),
-                    })
-                st.dataframe(pd.DataFrame(table_rows), use_container_width=True, height=220)
+                    with st.expander("Co sprawdzić i jak interpretować wyniki?", expanded=False):
+                        st.markdown(_gsc_checklist_text(primary_url, urls))
 
-                export_df = _make_group_export_df(selected_gid, urls, primary_url=primary_url)
-                _download_csv_button(export_df, "Pobierz CSV tej grupy", f"gsc_group_{selected_gid}.csv")
+            with tabs[1]:
+                st.markdown(f"### Pary powyżej progu: {threshold_pct}% ({method})")
+                if p is None or p.empty:
+                    st.info("Brak par powyżej progu. Zmniejsz próg lub zmień preset.")
+                else:
+                    st.dataframe(p, use_container_width=True, height=320)
 
-                with st.expander("Co sprawdzić i jak interpretować wyniki?", expanded=False):
-                    st.markdown(_gsc_checklist_text(primary_url, urls))
+            with tabs[2]:
+                st.markdown(f"### Grupy powyżej progu: {threshold_pct}% ({method})")
+                if g is None or g.empty:
+                    st.info("Brak grup.")
+                else:
+                    st.dataframe(g, use_container_width=True, height=320)
 
-                st.markdown("#### Mini-brief do wdrożenia")
-                brief = f"""[KANIBALIZACJA] Grupa {selected_gid}
+            with tabs[3]:
+                st.markdown("### Artykuły (Markdown)")
+                st.dataframe(a, use_container_width=True, height=320)
 
-Primary URL: {primary_url}
+            with tabs[4]:
+                st.markdown("### Eksport")
+                if a is not None and not a.empty:
+                    _download_csv_button(a, "articles.csv", "articles.csv")
+                if p is not None and not p.empty:
+                    _download_csv_button(p, "similarity_pairs.csv", "similarity_pairs.csv")
+                if g is not None and not g.empty:
+                    _download_csv_button(g, "similarity_groups.csv", "similarity_groups.csv")
 
-Pozostałe URL-e:
-{chr(10).join([u for u in urls if u != primary_url])}
+            with tabs[5]:
+                st.markdown("### Diagnostyka")
+                if st.session_state.sim_matrix is not None:
+                    sim = st.session_state.sim_matrix
+                    _plot_similarity_hist(sim, title=f"Similarity distribution ({method})")
+                log = st.session_state.run_log[-200:]
+                st.code("\n".join(log) if log else "Brak logu.")
 
-Co sprawdzić w GSC:
-1) Performance (3m + 16m) → Queries dla primary i pozostałych
-2) Dla top zapytań → Query filter → Pages (czy Google miesza URL-e)
-3) CTR / pozycja / wahania URL-i w czasie
-
-Decyzja:
-- [ ] Merge (scalenie) → 301/canonical
-- [ ] Split (rozdzielenie intencji) → zmiany title/H1/sekcji
-- [ ] Linkowanie wewnętrzne do primary
-- [ ] Inne: ______________________
-"""
-                st.code(brief)
-
-        # -------- Pairs
-        with tabs[1]:
-            st.markdown(f"### Pary powyżej progu: {threshold_pct}% ({method})")
-            if p is None or p.empty:
-                st.info("Brak par powyżej progu. Zmniejsz próg lub zmień preset.")
-            else:
-                st.dataframe(p, use_container_width=True, height=320)
-
-        # -------- Groups
-        with tabs[2]:
-            st.markdown(f"### Grupy powyżej progu: {threshold_pct}% ({method})")
-            if g is None or g.empty:
-                st.info("Brak grup.")
-            else:
-                st.dataframe(g, use_container_width=True, height=320)
-
-        # -------- Articles
-        with tabs[3]:
-            st.markdown("### Artykuły (Markdown)")
-            st.dataframe(a, use_container_width=True, height=320)
-
-        # -------- Export
-        with tabs[4]:
-            st.markdown("### Eksport")
-            if a is not None and not a.empty:
-                _download_csv_button(a, "articles.csv", "articles.csv")
-            if p is not None and not p.empty:
-                _download_csv_button(p, "similarity_pairs.csv", "similarity_pairs.csv")
-            if g is not None and not g.empty:
-                _download_csv_button(g, "similarity_groups.csv", "similarity_groups.csv")
-
-        # -------- Diagnostics
-        with tabs[5]:
-            st.markdown("### Diagnostyka")
-            if st.session_state.sim_matrix is not None:
-                sim = st.session_state.sim_matrix
-                _plot_similarity_hist(sim, title=f"Similarity distribution ({method})")
-            log = st.session_state.run_log[-200:]
-            st.code("\n".join(log) if log else "Brak logu.")
-
-        st.markdown("</div>", unsafe_allow_html=True)
 
 # -------------------------
 # Run pipeline
 # -------------------------
 if run_btn:
     st.session_state.run_log = []
+    status = st.empty()
+    bar = st.progress(0.0)
+    cb = _progress_callback_factory(status, bar, st.session_state.run_log)
 
     if not (base_url.startswith("http://") or base_url.startswith("https://")):
         st.error("Adres strony musi zaczynać się od http:// lub https://")
         st.stop()
 
-    status = st.empty()
-    bar = st.progress(0.0)
-    cb = _progress_callback_factory(status, bar, st.session_state.run_log)
-
-    # 1) Determine URLs / scrape
+    # 1) Get URLs + scrape
     try:
         if mode == "auto (sitemap, rss)":
             cb(0, 1, "Start: auto-wykrywanie URL-i i pobieranie artykułów…")
@@ -736,9 +621,6 @@ if run_btn:
         st.warning("Nie udało się pobrać żadnych artykułów.")
         st.stop()
 
-    # Fix Polish chars if needed
-    articles_df = _fix_dataframe_text(articles_df, ["H1", "title", "treść w Markdown"])
-
     # 2) Similarity
     cfg = SimilarityConfig(
         similarity_threshold_pct=float(threshold_pct),
@@ -757,9 +639,6 @@ if run_btn:
 
     pairs_df = similarity_pairs_report(articles_df, sim, threshold_pct=float(threshold_pct), max_pairs=int(max_pairs))
     groups_df = similarity_groups_report(articles_df, sim, threshold_pct=float(threshold_pct))
-
-    pairs_df = _fix_dataframe_text(pairs_df, ["title_a", "h1_a", "title_b", "h1_b"])
-    groups_df = _fix_dataframe_text(groups_df, ["urls"])
 
     st.session_state.articles_df = articles_df
     st.session_state.pairs_df = pairs_df
