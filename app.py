@@ -26,135 +26,79 @@ from analyzer import (
 st.set_page_config(page_title="Content Similarity Audit", layout="wide")
 
 ACCENT = "#d43584"  # marczak.me
-BG = "#ffffff"
-BORDER = "rgba(0,0,0,0.08)"
 
 # -------------------------
-# CSS (marczak-like + compact + sticky CTA)
+# CSS
 # -------------------------
 st.markdown(
     f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 html, body, [class*="css"] {{
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 }}
 
-h1 {{ font-size: 1.30rem !important; margin: 0.25rem 0 0.35rem 0 !important; }}
-h2 {{ font-size: 1.05rem !important; margin: 0.55rem 0 0.25rem 0 !important; }}
-h3 {{ font-size: 0.98rem !important; margin: 0.5rem 0 0.2rem 0 !important; }}
+h1 {{ font-size: 1.45rem !important; margin: 0.35rem 0 0.35rem 0 !important; }}
+h2 {{ font-size: 1.15rem !important; margin: 0.65rem 0 0.35rem 0 !important; }}
+h3 {{ font-size: 1.00rem !important; margin: 0.6rem 0 0.3rem 0 !important; }}
 
 small {{
-  color: rgba(0,0,0,0.58);
-  font-size: 0.84rem;
+  color: rgba(0,0,0,0.60);
+  font-size: 0.86rem;
 }}
 
-/* Keep everything inside 900px viewport feel */
-[data-testid="stAppViewContainer"] {{
-  max-height: 900px;
-}}
 [data-testid="stMainBlockContainer"] {{
-  padding-top: 1.0rem;   /* prevents title clipping */
-  padding-bottom: 4.4rem; /* room for sticky CTA bar */
+  padding-top: 0.95rem;
+  padding-bottom: 0.75rem;
   max-height: 900px;
   overflow-y: auto;
 }}
-
-/* Cards (containers) */
-div[data-testid="stVerticalBlock"] div[data-testid="stContainer"] {{
-  border-radius: 16px !important;
-  border: 1px solid {BORDER} !important;
-  background: rgba(255,255,255,0.92) !important;
-  box-shadow: 0 4px 18px rgba(0,0,0,0.035) !important;
-  padding: 12px 12px 10px 12px !important;
+[data-testid="stAppViewContainer"] {{
+  max-height: 900px;
 }}
 
-/* Make widgets a bit tighter */
-label, .stMarkdown p {{
-  font-size: 0.90rem !important;
-}}
-div[data-baseweb="input"] input {{
-  padding-top: 10px !important;
-  padding-bottom: 10px !important;
-}}
-div[data-baseweb="select"] > div {{
-  padding-top: 8px !important;
-  padding-bottom: 8px !important;
-}}
-
-/* Primary button (CTA) */
 div.stButton > button {{
   background: {ACCENT} !important;
   color: #ffffff !important;
   border: 1px solid {ACCENT} !important;
   border-radius: 12px !important;
-  padding: 0.62rem 1.00rem !important;
-  font-weight: 800 !important;
+  padding: 0.55rem 0.9rem !important;
+  font-weight: 700 !important;
 }}
 div.stButton > button:hover {{
   filter: brightness(0.95);
 }}
 
-/* Sliders: avoid "error red" vibe (best-effort, Streamlit varies by version) */
-div[data-testid="stSlider"] [data-baseweb="slider"] div[role="slider"] {{
-  border-color: rgba(0,0,0,0.25) !important;
-  background-color: rgba(0,0,0,0.25) !important;
-}}
-div[data-testid="stSlider"] [data-baseweb="slider"] div[aria-valuetext] {{
-  color: rgba(0,0,0,0.60) !important;
-}}
-div[data-testid="stSlider"] [data-baseweb="slider"] div {{
-  color: rgba(0,0,0,0.60) !important;
+div[data-testid="stVerticalBlock"] div[data-testid="stContainer"] {{
+  border-radius: 16px !important;
+  border: 1px solid rgba(0,0,0,0.08) !important;
+  background: rgba(255,255,255,0.88) !important;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.04) !important;
+  padding: 12px 12px 10px 12px !important;
 }}
 
-/* Progress bar color (best-effort) */
-div[data-testid="stProgress"] > div > div > div {{
-  background-color: {ACCENT} !important;
+label, .stMarkdown p {{
+  font-size: 0.92rem !important;
 }}
 
-/* Dataframes */
 div[data-testid="stDataFrame"] {{
   border-radius: 14px;
   overflow: hidden;
-  border: 1px solid {BORDER};
+  border: 1px solid rgba(0,0,0,0.08);
 }}
 
-/* Tabs */
 .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
 .stTabs [data-baseweb="tab"] {{ border-radius: 10px; }}
 
-/* Step titles */
 .step-title {{
   font-weight: 800;
-  font-size: 0.94rem;
-  margin: 0 0 0.35rem 0;
+  font-size: 0.95rem;
+  margin: 0 0 0.4rem 0;
 }}
-
-/* Sticky CTA bar at bottom */
-#sticky-cta {{
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 9999;
-  padding: 10px 18px;
-  background: rgba(255,255,255,0.92);
-  backdrop-filter: blur(8px);
-  border-top: 1px solid {BORDER};
-}}
-#sticky-cta-inner {{
-  max-width: 1200px;
-  margin: 0 auto;
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  justify-content: space-between;
-}}
-#sticky-cta-hint {{
+.mini-muted {{
   color: rgba(0,0,0,0.55);
   font-size: 0.86rem;
-  line-height: 1.2;
 }}
 </style>
 """,
@@ -342,10 +286,20 @@ st.markdown("<small>Scrape → Markdown → Similarity → Cannibalization</smal
 st.markdown("")
 
 # -------------------------
-# Top layout (the "best" one): left settings + right mini results
+# TOP ROW: config (left) + empty/help (right)
 # -------------------------
 left, right = st.columns([1.05, 1.0], gap="large")
 
+# We'll render results in a FULL-WIDTH section below.
+# Progress/status/CTA will live in its own left-card.
+
+# Placeholders for status UI (will be created inside the "Start" card)
+status_box = None
+progress_bar = None
+error_box = None
+log_box = None
+
+# Inputs store
 with left:
     with st.container(border=True):
         r1a, r1b = st.columns([0.34, 0.66], vertical_alignment="center")
@@ -360,20 +314,23 @@ with left:
             ).strip()
 
     with st.container(border=True):
-        st.markdown('<div class="step-title">Źródło URL-i</div>', unsafe_allow_html=True)
-        mode = st.radio(
-            label="",
-            options=[
-                "auto (sitemap, rss)",
-                "url sitemapy",
-                "csv z sitemapą",
-                "wklej URL-e",
-                "wgraj CSV z URL-ami",
-            ],
-            index=0,
-            horizontal=True,
-            label_visibility="collapsed",
-        )
+        r2a, r2b = st.columns([0.34, 0.66], vertical_alignment="center")
+        with r2a:
+            st.markdown('<div class="step-title">Źródło URL-i</div>', unsafe_allow_html=True)
+        with r2b:
+            mode = st.radio(
+                label="",
+                options=[
+                    "auto (sitemap, rss)",
+                    "url sitemapy",
+                    "csv z sitemapą",
+                    "wklej URL-e",
+                    "wgraj CSV z URL-ami",
+                ],
+                index=0,
+                horizontal=True,
+                label_visibility="collapsed",
+            )
 
         sitemap_url = ""
         sitemap_upload = None
@@ -389,21 +346,21 @@ with left:
 
         if mode == "csv z sitemapą":
             sitemap_upload = st.file_uploader(
-                "Wgraj sitemapę jako XML lub CSV",
+                label="Wgraj sitemapę jako XML lub CSV",
                 type=["xml", "csv"],
             )
 
         if mode == "wklej URL-e":
             manual_urls_text = st.text_area(
                 label="",
-                height=100,
+                height=110,
                 placeholder="Wklej URL-e (1 linia = 1 URL)",
                 label_visibility="collapsed",
             )
 
         if mode == "wgraj CSV z URL-ami":
             uploaded_urls_csv = st.file_uploader(
-                "Wgraj CSV z URL-ami (kolumna URL lub pierwsza kolumna)",
+                label="Wgraj CSV z URL-ami (kolumna URL lub pierwsza kolumna)",
                 type=["csv"],
             )
 
@@ -433,61 +390,44 @@ with left:
         min_words = colb2.number_input("Min słów", 10, 500, 40, 10)
         max_pairs = colb3.number_input("Limit par", 100, 20000, 2000, 100)
 
-    # Optional: keep the in-page CTA too (you can delete this block if you want ONLY sticky CTA)
-    inpage_run = st.button("Rozpocznij analizę", type="primary")
+    # START / STATUS CARD (same width as left)
+    with st.container(border=True):
+        st.markdown('<div class="step-title">Start / status</div>', unsafe_allow_html=True)
+        st.markdown('<div class="mini-muted">Tu pojawią się błędy, postęp i log.</div>', unsafe_allow_html=True)
+
+        run_btn = st.button("Rozpocznij analizę", type="primary")
+
+        # Dedicated UI slots
+        error_box = st.empty()
+        progress_bar = st.progress(0.0)
+        status_box = st.empty()
+        log_box = st.empty()
+
 
 with right:
+    # Keep this area light/empty (you can add later tips)
     with st.container(border=True):
-        st.markdown('<div class="step-title">Wyniki</div>', unsafe_allow_html=True)
-
-        a = st.session_state.articles_df
-        p = st.session_state.pairs_df
-        g = st.session_state.groups_df
-
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Artykuły", "—" if a is None else len(a))
-        m2.metric("Pary", "—" if p is None else len(p))
-        m3.metric("Grupy", "—" if g is None else len(g))
-
-        if a is None:
-            st.info("Uruchom analizę, żeby zobaczyć wyniki.")
+        st.markdown('<div class="step-title">Podpowiedzi</div>', unsafe_allow_html=True)
+        st.markdown(
+            "- Jeśli nic nie wychodzi przy 40–50%, spróbuj progu 20–30% i metody **hybrid**.\n"
+            "- Najbardziej użyteczne w praktyce są **grupy**, a potem weryfikacja w **GSC**.\n",
+        )
 
 # -------------------------
-# Sticky CTA bar
-# -------------------------
-sticky_placeholder = st.empty()
-with sticky_placeholder:
-    st.markdown(
-        f"""
-<div id="sticky-cta">
-  <div id="sticky-cta-inner">
-    <div id="sticky-cta-hint">
-      Ustaw parametry po lewej i uruchom analizę. Wyniki pojawią się poniżej.
-    </div>
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-# Create sticky CTA button in a separate container (Streamlit button must be in Python, not HTML)
-cta_cols = st.columns([0.75, 0.25])
-with cta_cols[1]:
-    sticky_run = st.button("Rozpocznij analizę", type="primary")
-
-# One source of truth for "run"
-run_btn = bool(inpage_run) or bool(sticky_run)
-
-# -------------------------
-# RESULTS (full section)
+# RESULTS SECTION (FULL WIDTH BELOW)
 # -------------------------
 st.markdown("")
 with st.container(border=True):
-    st.markdown('<div class="step-title">Wyniki (szczegóły)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="step-title">Wyniki</div>', unsafe_allow_html=True)
 
     a = st.session_state.articles_df
     p = st.session_state.pairs_df
     g = st.session_state.groups_df
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Artykuły", "—" if a is None else len(a))
+    m2.metric("Pary", "—" if p is None else len(p))
+    m3.metric("Grupy", "—" if g is None else len(g))
 
     if a is None:
         st.info("Uruchom analizę, żeby zobaczyć wyniki.")
@@ -508,6 +448,7 @@ with st.container(border=True):
 
                 primary_url = st.selectbox("Primary URL", options=urls, index=0 if urls else None)
 
+                # compact table: url/title/h1
                 titles_map, h1_map = {}, {}
                 if a is not None and not a.empty:
                     a_map = a.set_index("URL")
@@ -568,17 +509,33 @@ with st.container(border=True):
             st.code("\n".join(log) if log else "Brak logu.")
 
 # -------------------------
-# Run pipeline
+# Run pipeline (uses the Start/status box UI)
 # -------------------------
 if run_btn:
     st.session_state.run_log = []
-    status = st.empty()
-    bar = st.progress(0.0)
-    cb = _progress_callback_factory(status, bar, st.session_state.run_log)
+    if error_box:
+        error_box.empty()
+    if status_box:
+        status_box.empty()
+    if log_box:
+        log_box.empty()
+    if progress_bar:
+        progress_bar.progress(0.0)
 
+    def push_log():
+        log = (st.session_state.run_log or [])[-200:]
+        if log_box is not None:
+            log_box.code("\n".join(log) if log else "Log pojawi się tutaj…")
+
+    # validate base url (show error INSIDE the start/status card)
     if not (base_url.startswith("http://") or base_url.startswith("https://")):
-        st.error("Adres strony musi zaczynać się od http:// lub https://")
+        if error_box is not None:
+            error_box.error("Adres strony musi zaczynać się od http:// lub https://")
+        push_log()
         st.stop()
+
+    # build callback wired to our UI
+    cb = _progress_callback_factory(status_box, progress_bar, st.session_state.run_log)
 
     try:
         if mode == "auto (sitemap, rss)":
@@ -595,20 +552,23 @@ if run_btn:
 
         elif mode == "url sitemapy":
             if not sitemap_url:
-                st.error("Podaj URL sitemapy.")
+                error_box.error("Podaj URL sitemapy.")
+                push_log()
                 st.stop()
 
             cb(0, 1, f"Pobieram sitemapę: {sitemap_url}")
             r = requests.get(sitemap_url, timeout=int(timeout), headers={"User-Agent": "Mozilla/5.0"})
             if r.status_code >= 400:
-                st.error(f"Nie udało się pobrać sitemapy (HTTP {r.status_code}).")
+                error_box.error(f"Nie udało się pobrać sitemapy (HTTP {r.status_code}).")
+                push_log()
                 st.stop()
 
             urls = _parse_sitemap_xml(r.text)
             urls = [normalize_url_public(u) for u in urls]
             urls = filter_internal_urls_public(urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
             if not urls:
-                st.error("W sitemapie nie znaleziono URL-i pasujących do domeny / filtra.")
+                error_box.error("W sitemapie nie znaleziono URL-i pasujących do domeny / filtra.")
+                push_log()
                 st.stop()
 
             cb(0, 1, f"Start: pobieranie treści dla {min(len(urls), int(max_pages))} URL-i z sitemapy…")
@@ -624,14 +584,16 @@ if run_btn:
 
         elif mode == "csv z sitemapą":
             if sitemap_upload is None:
-                st.error("Wgraj sitemapę jako XML lub CSV.")
+                error_box.error("Wgraj sitemapę jako XML lub CSV.")
+                push_log()
                 st.stop()
 
             urls = _read_sitemap_from_upload(sitemap_upload)
             urls = [normalize_url_public(u) for u in urls]
             urls = filter_internal_urls_public(urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
             if not urls:
-                st.error("W pliku sitemapy nie znaleziono URL-i pasujących do domeny / filtra.")
+                error_box.error("W pliku sitemapy nie znaleziono URL-i pasujących do domeny / filtra.")
+                push_log()
                 st.stop()
 
             cb(0, 1, f"Start: pobieranie treści dla {min(len(urls), int(max_pages))} URL-i z pliku sitemapy…")
@@ -650,7 +612,8 @@ if run_btn:
             urls = [normalize_url_public(u) for u in urls]
             urls = filter_internal_urls_public(urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
             if not urls:
-                st.error("Nie wykryto poprawnych URL-i do analizy.")
+                error_box.error("Nie wykryto poprawnych URL-i do analizy.")
+                push_log()
                 st.stop()
 
             cb(0, 1, f"Start: pobieranie treści dla {min(len(urls), int(max_pages))} URL-i…")
@@ -666,14 +629,16 @@ if run_btn:
 
         else:  # wgraj CSV z URL-ami
             if uploaded_urls_csv is None:
-                st.error("Wgraj CSV z URL-ami.")
+                error_box.error("Wgraj CSV z URL-ami.")
+                push_log()
                 st.stop()
 
             urls = _read_urls_from_uploaded_csv(uploaded_urls_csv)
             urls = [normalize_url_public(u) for u in urls]
             urls = filter_internal_urls_public(urls, base_url=base_url, same_subdomain_only=bool(same_subdomain_only))
             if not urls:
-                st.error("W CSV nie znaleziono URL-i pasujących do domeny / filtra.")
+                error_box.error("W CSV nie znaleziono URL-i pasujących do domeny / filtra.")
+                push_log()
                 st.stop()
 
             cb(0, 1, f"Start: pobieranie treści dla {min(len(urls), int(max_pages))} URL-i z CSV…")
@@ -688,11 +653,13 @@ if run_btn:
             )
 
     except Exception as e:
-        st.exception(e)
+        error_box.exception(e)
+        push_log()
         st.stop()
 
     if articles_df is None or articles_df.empty:
-        st.warning("Nie udało się pobrać żadnych artykułów.")
+        error_box.warning("Nie udało się pobrać żadnych artykułów.")
+        push_log()
         st.stop()
 
     cfg = SimilarityConfig(
@@ -718,6 +685,7 @@ if run_btn:
     st.session_state.groups_df = groups_df
     st.session_state.sim_matrix = sim
 
-    bar.progress(1.0)
-    status.write("Gotowe ✅")
+    progress_bar.progress(1.0)
+    status_box.success("Gotowe ✅")
+    push_log()
     st.rerun()
