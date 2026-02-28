@@ -28,7 +28,7 @@ st.set_page_config(page_title="Content Similarity Audit", layout="wide")
 ACCENT = "#d43584"  # marczak.me
 
 # -------------------------
-# CSS (marczak.me vibe + 900px viewport)
+# CSS
 # -------------------------
 st.markdown(
     f"""
@@ -39,25 +39,24 @@ html, body, [class*="css"] {{
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 }}
 
-h1 {{ font-size: 1.45rem !important; margin: 0.3rem 0 0.35rem 0 !important; }}
-h2 {{ font-size: 1.15rem !important; margin: 0.7rem 0 0.35rem 0 !important; }}
-h3 {{ font-size: 1.00rem !important; margin: 0.65rem 0 0.3rem 0 !important; }}
-h4 {{ font-size: 0.95rem !important; }}
+h1 {{ font-size: 1.45rem !important; margin: 0.35rem 0 0.35rem 0 !important; }}
+h2 {{ font-size: 1.15rem !important; margin: 0.65rem 0 0.35rem 0 !important; }}
+h3 {{ font-size: 1.00rem !important; margin: 0.6rem 0 0.3rem 0 !important; }}
 
-small, .mini-note {{
+small {{
   color: rgba(0,0,0,0.60);
   font-size: 0.86rem;
 }}
 
-/* Keep app in ~900px height, but DO NOT clip top */
-[data-testid="stAppViewContainer"] {{
-  max-height: 900px;
-}}
+/* Fix title clipping: add a bit of top space */
 [data-testid="stMainBlockContainer"] {{
-  padding-top: 0.65rem;
+  padding-top: 0.95rem;   /* ~15px */
   padding-bottom: 0.75rem;
   max-height: 900px;
   overflow-y: auto;
+}}
+[data-testid="stAppViewContainer"] {{
+  max-height: 900px;
 }}
 
 /* Primary button */
@@ -73,7 +72,7 @@ div.stButton > button:hover {{
   filter: brightness(0.95);
 }}
 
-/* Make bordered containers look like cards */
+/* Card containers */
 div[data-testid="stVerticalBlock"] div[data-testid="stContainer"] {{
   border-radius: 16px !important;
   border: 1px solid rgba(0,0,0,0.08) !important;
@@ -82,22 +81,27 @@ div[data-testid="stVerticalBlock"] div[data-testid="stContainer"] {{
   padding: 12px 12px 10px 12px !important;
 }}
 
-/* Tighten some widget spacing */
-div[data-testid="stRadio"] > label, div[data-testid="stCheckbox"] > label {{
-  font-size: 0.92rem;
+/* Smaller labels and tighter spacing */
+label, .stMarkdown p {{
+  font-size: 0.92rem !important;
 }}
+
+/* Dataframes */
 div[data-testid="stDataFrame"] {{
   border-radius: 14px;
   overflow: hidden;
   border: 1px solid rgba(0,0,0,0.08);
 }}
 
-/* Tabs spacing */
-.stTabs [data-baseweb="tab-list"] {{
-  gap: 8px;
-}}
-.stTabs [data-baseweb="tab"] {{
-  border-radius: 10px;
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
+.stTabs [data-baseweb="tab"] {{ border-radius: 10px; }}
+
+/* Utility row titles */
+.step-title {{
+  font-weight: 800;
+  font-size: 0.95rem;
+  margin: 0 0 0.4rem 0;
 }}
 </style>
 """,
@@ -140,7 +144,6 @@ def _read_urls_from_uploaded_csv(file) -> list[str]:
     else:
         urls = df.iloc[:, 0].astype(str).tolist()
     urls = [u.strip() for u in urls if u and str(u).startswith(("http://", "https://"))]
-    # dedupe
     seen = set()
     out = []
     for u in urls:
@@ -168,7 +171,6 @@ def _parse_sitemap_xml(xml_text: str) -> list[str]:
 def _read_sitemap_from_upload(uploaded_file) -> list[str]:
     name = (uploaded_file.name or "").lower()
     raw = uploaded_file.getvalue()
-
     if name.endswith(".xml"):
         try:
             txt = raw.decode("utf-8", errors="ignore")
@@ -176,7 +178,6 @@ def _read_sitemap_from_upload(uploaded_file) -> list[str]:
             txt = raw.decode("latin1", errors="ignore")
         return _parse_sitemap_xml(txt)
 
-    # CSV fallback
     df = _try_read_csv_with_encodings(uploaded_file)
     if df is None or df.empty:
         return []
@@ -245,11 +246,7 @@ def _urls_from_groups_row(urls_cell: str) -> list[str]:
 def _make_group_export_df(group_id: int, urls: list[str], primary_url: str = "") -> pd.DataFrame:
     rows = []
     for u in urls:
-        rows.append({
-            "group_id": group_id,
-            "url": u,
-            "is_primary": "YES" if primary_url and u == primary_url else "",
-        })
+        rows.append({"group_id": group_id, "url": u, "is_primary": "YES" if primary_url and u == primary_url else ""})
     return pd.DataFrame(rows, columns=["group_id", "url", "is_primary"])
 
 
@@ -265,21 +262,13 @@ def _gsc_checklist_text(primary_url: str, urls: list[str]) -> str:
         "### Krok 2\n"
         "- Filtr Strona = Primary URL → zobacz Zapytania\n"
         "- Porównaj z pozostałymi URL-ami\n\n"
-        "Sygnały kanibalizacji:\n"
-        "- te same zapytania na kilku URL-ach\n"
-        "- wykresy kliknięć/wyświetleń przechodzą między URL-ami\n"
-        "- CTR spada, bo Google testuje różne strony\n\n"
         "### Krok 3\n"
         "- Weź top zapytania z Primary URL\n"
         "- Dla każdego: filtr Zapytanie → zakładka Strony\n"
         "- Jeśli pojawiają się 2–3 URL-e z grupy na to samo zapytanie, to silny sygnał kanibalizacji\n\n"
         "### Decyzja\n"
-        "Jeśli intencja ta sama:\n"
-        "- scal treść do Primary URL, a resztę 301 albo canonical\n"
-        "- wzmocnij linkowanie wewnętrzne do Primary URL\n\n"
-        "Jeśli intencje różne:\n"
-        "- rozdziel zakres i doprecyzuj title/H1\n"
-        "- dodaj linki między artykułami\n\n"
+        "Jeśli intencja ta sama: scal treść do Primary URL + 301/canonical + internal linking.\n"
+        "Jeśli intencje różne: rozdziel zakres + doprecyzuj title/H1 + linki między artykułami.\n\n"
         f"Primary URL: {primary_url or '(nie wybrano)'}\n"
         f"Pozostałe URL-e: {other_count}\n"
     )
@@ -288,53 +277,53 @@ def _gsc_checklist_text(primary_url: str, urls: list[str]) -> str:
 # -------------------------
 # Session state
 # -------------------------
-if "articles_df" not in st.session_state:
-    st.session_state.articles_df = None
-if "pairs_df" not in st.session_state:
-    st.session_state.pairs_df = None
-if "groups_df" not in st.session_state:
-    st.session_state.groups_df = None
-if "sim_matrix" not in st.session_state:
-    st.session_state.sim_matrix = None
-if "run_log" not in st.session_state:
-    st.session_state.run_log = []
-
+for key in ["articles_df", "pairs_df", "groups_df", "sim_matrix", "run_log"]:
+    if key not in st.session_state:
+        st.session_state[key] = None if key != "run_log" else []
 
 # -------------------------
-# Header (compact)
+# Header
 # -------------------------
 st.markdown("## Content Similarity Audit")
 st.markdown("<small>Scrape → Markdown → Similarity → Cannibalization</small>", unsafe_allow_html=True)
 st.markdown("")
 
-# -------------------------
-# Layout
-# -------------------------
 left, right = st.columns([1.05, 1.0], gap="large")
 
 # -------------------------
-# LEFT
+# LEFT: compact rows (title on left, widget on right)
 # -------------------------
 with left:
     with st.container(border=True):
-        st.markdown("**1. Podaj adres strony**")
-        base_url = st.text_input("Adres strony", value="https://marczak.me").strip()
+        r1a, r1b = st.columns([0.34, 0.66], vertical_alignment="center")
+        with r1a:
+            st.markdown('<div class="step-title">1. Podaj adres strony</div>', unsafe_allow_html=True)
+        with r1b:
+            base_url = st.text_input(
+                label="",
+                value="https://marczak.me",
+                placeholder="https://marczak.me",
+                label_visibility="collapsed",
+            ).strip()
 
     with st.container(border=True):
-        st.markdown("**Źródło URL-i**")
-
-        mode = st.radio(
-            "Jak chcesz dostarczyć URL-e?",
-            options=[
-                "auto (sitemap, rss)",
-                "url sitemapy",
-                "csv z sitemapą",
-                "wklej URL-e",
-                "wgraj CSV z URL-ami",
-            ],
-            index=0,
-            horizontal=True,
-        )
+        r2a, r2b = st.columns([0.34, 0.66], vertical_alignment="center")
+        with r2a:
+            st.markdown('<div class="step-title">Źródło URL-i</div>', unsafe_allow_html=True)
+        with r2b:
+            mode = st.radio(
+                label="",
+                options=[
+                    "auto (sitemap, rss)",
+                    "url sitemapy",
+                    "csv z sitemapą",
+                    "wklej URL-e",
+                    "wgraj CSV z URL-ami",
+                ],
+                index=0,
+                horizontal=True,
+                label_visibility="collapsed",
+            )
 
         sitemap_url = ""
         sitemap_upload = None
@@ -343,31 +332,35 @@ with left:
 
         if mode == "url sitemapy":
             sitemap_url = st.text_input(
-                "URL sitemapy (XML)",
-                placeholder="https://marczak.me/sitemap.xml",
+                label="",
+                placeholder="URL sitemapy (np. https://marczak.me/sitemap.xml)",
+                label_visibility="collapsed",
             ).strip()
 
         if mode == "csv z sitemapą":
             sitemap_upload = st.file_uploader(
-                "Wgraj sitemapę jako XML lub CSV",
+                label="",
                 type=["xml", "csv"],
+                label_visibility="collapsed",
             )
 
         if mode == "wklej URL-e":
             manual_urls_text = st.text_area(
-                "URL-e (1 linia = 1 URL)",
-                height=120,
-                placeholder="https://marczak.me/jakis-artykul/\nhttps://marczak.me/inny-artykul/",
+                label="",
+                height=110,
+                placeholder="Wklej URL-e (1 linia = 1 URL)",
+                label_visibility="collapsed",
             )
 
         if mode == "wgraj CSV z URL-ami":
             uploaded_urls_csv = st.file_uploader(
-                "Wgraj CSV z URL-ami (kolumna URL lub pierwsza kolumna)",
+                label="",
                 type=["csv"],
+                label_visibility="collapsed",
             )
 
     with st.container(border=True):
-        st.markdown("**2. Ustawienia scrapowania**")
+        st.markdown('<div class="step-title">2. Ustawienia scrapowania</div>', unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
         max_pages = c1.number_input("Limit artykułów", 1, 2000, 200, 10)
         timeout = c2.number_input("Timeout (s)", 5, 120, 20, 5)
@@ -375,7 +368,7 @@ with left:
         same_subdomain_only = st.checkbox("Tylko ta sama subdomena", value=True)
 
     with st.container(border=True):
-        st.markdown("**3. Analiza podobieństwa**")
+        st.markdown('<div class="step-title">3. Analiza podobieństwa</div>', unsafe_allow_html=True)
         preset = st.selectbox("Preset", options=["kanibalizacja", "overlap tematu", "duplikacja", "ostrożnie"], index=0)
         preset_method, preset_thr, preset_boiler = _preset_settings(preset)
 
@@ -392,6 +385,7 @@ with left:
         min_words = colb2.number_input("Min słów", 10, 500, 40, 10)
         max_pairs = colb3.number_input("Limit par", 100, 20000, 2000, 100)
 
+    # CTA (kept visible, below steps)
     run_btn = st.button("Rozpocznij analizę", type="primary")
 
 
@@ -400,7 +394,7 @@ with left:
 # -------------------------
 with right:
     with st.container(border=True):
-        st.markdown("**Wyniki**")
+        st.markdown('<div class="step-title">Wyniki</div>', unsafe_allow_html=True)
 
         a = st.session_state.articles_df
         p = st.session_state.pairs_df
@@ -428,7 +422,6 @@ with right:
                     urls = _urls_from_groups_row(row["urls"])
                     st.write(f"Rozmiar grupy: **{int(row['size'])}**")
 
-                    # primary url
                     primary_url = st.selectbox("Primary URL", options=urls, index=0 if urls else None)
 
                     # compact table
@@ -445,9 +438,8 @@ with right:
 
                     table_rows = []
                     for u in urls:
-                        table_rows.append(
-                            {"primary": "✅" if u == primary_url else "", "url": u, "title": titles_map.get(u, ""), "h1": h1_map.get(u, "")}
-                        )
+                        table_rows.append({"primary": "✅" if u == primary_url else "", "url": u, "title": titles_map.get(u, ""), "h1": h1_map.get(u, "")})
+
                     st.dataframe(pd.DataFrame(table_rows), use_container_width=True, height=220)
 
                     export_df = _make_group_export_df(selected_gid, urls, primary_url=primary_url)
@@ -488,7 +480,7 @@ with right:
                 if st.session_state.sim_matrix is not None:
                     sim = st.session_state.sim_matrix
                     _plot_similarity_hist(sim, title=f"Similarity distribution ({method})")
-                log = st.session_state.run_log[-200:]
+                log = (st.session_state.run_log or [])[-200:]
                 st.code("\n".join(log) if log else "Brak logu.")
 
 
@@ -505,7 +497,6 @@ if run_btn:
         st.error("Adres strony musi zaczynać się od http:// lub https://")
         st.stop()
 
-    # 1) Get URLs + scrape
     try:
         if mode == "auto (sitemap, rss)":
             cb(0, 1, "Start: auto-wykrywanie URL-i i pobieranie artykułów…")
@@ -621,7 +612,6 @@ if run_btn:
         st.warning("Nie udało się pobrać żadnych artykułów.")
         st.stop()
 
-    # 2) Similarity
     cfg = SimilarityConfig(
         similarity_threshold_pct=float(threshold_pct),
         method=method,
